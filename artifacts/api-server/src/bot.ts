@@ -17,6 +17,14 @@ if (!token) {
 export const bot = new Telegraf(token);
 
 const COOKIES_PATH = path.join("/home/runner/workspace/data", "yt_cookies.txt");
+const OWNER_ID = process.env.TELEGRAM_OWNER_ID
+  ? Number(process.env.TELEGRAM_OWNER_ID)
+  : null;
+
+function isOwner(chatId: number): boolean {
+  if (!OWNER_ID) return true;
+  return chatId === OWNER_ID;
+}
 
 type Step = "idle" | "waiting_url" | "waiting_start" | "waiting_end";
 
@@ -261,12 +269,23 @@ bot.command("clip", (ctx) => {
   ctx.reply("🔗 Paso 1/3 — Envíame el link de YouTube:");
 });
 
+bot.command("miid", (ctx) => {
+  ctx.reply(
+    `🪪 Tu ID de Telegram es:\n\n\`${ctx.chat.id}\`\n\nCopia este número y dáselo al administrador del bot para activar permisos especiales.`,
+    { parse_mode: "Markdown" }
+  );
+});
+
 bot.on("document", async (ctx) => {
   const doc = ctx.message.document;
   const fileName = doc.file_name?.toLowerCase() ?? "";
 
   if (!fileName.includes("cookie") && !fileName.endsWith(".txt")) {
     return ctx.reply('Para subir cookies, envía un archivo .txt exportado desde tu navegador.\n\nUsa /cookies para ver las instrucciones.');
+  }
+
+  if (!isOwner(ctx.chat.id)) {
+    return ctx.reply("⛔ Solo el administrador del bot puede actualizar las cookies.");
   }
 
   const statusMsg = await ctx.reply("⏳ Guardando cookies...");
@@ -387,6 +406,7 @@ export async function startBot() {
       { command: "clip", description: "🎬 Crear un clip de YouTube" },
       { command: "cookies", description: "🍪 Configurar cookies (para videos /live)" },
       { command: "cancelar", description: "❌ Cancelar la operación actual" },
+      { command: "miid", description: "🪪 Ver mi ID de Telegram" },
       { command: "start", description: "👋 Ver bienvenida y ayuda" },
     ]);
     await bot.launch();
