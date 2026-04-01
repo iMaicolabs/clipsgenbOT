@@ -1,4 +1,4 @@
-import { Telegraf, Context } from "telegraf";
+import { Telegraf } from "telegraf";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
@@ -15,9 +15,31 @@ if (!token) {
 
 export const bot = new Telegraf(token);
 
+type Step = "idle" | "waiting_url" | "waiting_start" | "waiting_end";
+
+interface UserSession {
+  step: Step;
+  url?: string;
+  startSec?: number;
+  startStr?: string;
+}
+
+const sessions = new Map<number, UserSession>();
+
+function getSession(chatId: number): UserSession {
+  if (!sessions.has(chatId)) {
+    sessions.set(chatId, { step: "idle" });
+  }
+  return sessions.get(chatId)!;
+}
+
+function resetSession(chatId: number) {
+  sessions.set(chatId, { step: "idle" });
+}
+
 function parseTime(t: string): number {
   const parts = t.split(":").map(Number);
-  if (parts.some(isNaN)) throw new Error(`Tiempo inválido: ${t}`);
+  if (parts.some(isNaN)) throw new Error(`Tiempo inválido: "${t}"`);
   if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
   if (parts.length === 2) return parts[0] * 60 + parts[1];
   return parts[0];
@@ -37,68 +59,23 @@ async function cleanupFiles(files: string[]) {
   }
 }
 
-bot.command("start", (ctx) => {
-  ctx.reply(
-    `👋 *Bot de clips de YouTube*\n\n` +
-      `Envíame un comando así:\n\n` +
-      `\`/clip URL inicio fin\`\n\n` +
-      `*Ejemplos:*\n` +
-      `\`/clip https://youtu.be/dQw4w9WgXcQ 0:30 1:00\`\n` +
-      `\`/clip https://youtu.be/dQw4w9WgXcQ 1:30 2:15\`\n\n` +
-      `⏱ Tiempo en formato \`mm:ss\` o \`hh:mm:ss\`\n` +
-      `📦 Máximo 50MB por clip`,
-    { parse_mode: "Markdown" }
-  );
-});
-
-bot.command("clip", async (ctx) => {
-  const text = ctx.message.text;
-  const parts = text.trim().split(/\s+/);
-
-  if (parts.length < 4) {
-    return ctx.reply(
-      "❌ Formato incorrecto.\n\nUsa: `/clip URL inicio fin`\n\nEjemplo: `/clip https://youtu.be/dQw4w9WgXcQ 0:30 1:00`",
-      { parse_mode: "Markdown" }
-    );
-  }
-
-  const url = parts[1];
-  const startStr = parts[2];
-  const endStr = parts[3];
-
-  let startSec: number;
-  let endSec: number;
-
-  try {
-    startSec = parseTime(startStr);
-    endSec = parseTime(endStr);
-  } catch (e: any) {
-    return ctx.reply(`❌ ${e.message}\n\nUsa formato mm:ss (ej: 1:30)`);
-  }
-
-  if (endSec <= startSec) {
-    return ctx.reply("❌ El tiempo de fin debe ser mayor que el de inicio.");
-  }
-
+async function processClip(
+  ctx: any,
+  url: string,
+  startSec: number,
+  startStr: string,
+  endSec: number,
+  endStr: string
+) {
   const duration = endSec - startSec;
-  if (duration > 180) {
-    return ctx.reply(
-      `❌ El clip es demasiado largo (${formatDuration(duration)}). Máximo 3 minutos.`
-    );
-  }
-
-  if (!url.includes("youtube.com") && !url.includes("youtu.be")) {
-    return ctx.reply("❌ Solo se aceptan links de YouTube.");
-  }
-
-  const statusMsg = await ctx.reply(
-    `⏳ Procesando clip...\n\n🔗 ${url}\n⏱ ${startStr} → ${endStr} (${formatDuration(duration)})`
-  );
-
   const tmpDir = os.tmpdir();
   const timestamp = Date.now();
   const rawFile = path.join(tmpDir, `yt_raw_${timestamp}.mp4`);
   const clipFile = path.join(tmpDir, `yt_clip_${timestamp}.mp4`);
+
+  const statusMsg = await ctx.reply(
+    `⏳ Procesando clip...\n⏱ ${startStr} → ${endStr} (${formatDuration(duration)})`
+  );
 
   try {
     logger.info({ url, startSec, endSec }, "Downloading YouTube video");
@@ -107,7 +84,7 @@ bot.command("clip", async (ctx) => {
       ctx.chat.id,
       statusMsg.message_id,
       undefined,
-      `⬇️ Descargando video...\n\n⏱ ${startStr} → ${endStr}`
+      `⬇️ Descargando video...\n⏱ ${startStr} → ${endStr}`
     );
 
     const ytdlpClients = ["ios", "android", "web_embedded"];
@@ -203,21 +180,115 @@ bot.command("clip", async (ctx) => {
         ctx.chat.id,
         statusMsg.message_id,
         undefined,
-        `❌ Error: ${friendly}`
+        `❌ ${friendly}`
       );
     } catch {
-      await ctx.reply(`❌ Error: ${friendly}`);
+      await ctx.reply(`❌ ${friendly}`);
     }
   } finally {
     await cleanupFiles([rawFile, clipFile]);
   }
-});
+}
 
-bot.on("message", (ctx) => {
+bot.command("start", (ctx) => {
+  resetSession(ctx.chat.id);
   ctx.reply(
-    '💡 Usa el comando /clip para crear un clip.\n\nEjemplo:\n`/clip https://youtu.be/dQw4w9WgXcQ 0:30 1:00`',
+    `👋 *Bot de clips de YouTube*\n\nEnvía /clip para comenzar a crear un clip.\n\nTe voy pidiendo los datos paso a paso.`,
     { parse_mode: "Markdown" }
   );
+});
+
+bot.command("cancelar", (ctx) => {
+  resetSession(ctx.chat.id);
+  ctx.reply("❌ Cancelado. Envía /clip cuando quieras empezar de nuevo.");
+});
+
+bot.command("clip", (ctx) => {
+  const session = getSession(ctx.chat.id);
+  session.step = "waiting_url";
+  session.url = undefined;
+  session.startSec = undefined;
+  session.startStr = undefined;
+  ctx.reply("🔗 Paso 1/3 — Envíame el link de YouTube:");
+});
+
+bot.on("text", async (ctx) => {
+  const chatId = ctx.chat.id;
+  const session = getSession(chatId);
+  const text = ctx.message.text.trim();
+
+  if (text.startsWith("/")) return;
+
+  if (session.step === "idle") {
+    return ctx.reply(
+      "Envía /clip para crear un clip de YouTube.",
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  if (session.step === "waiting_url") {
+    if (!text.includes("youtube.com") && !text.includes("youtu.be")) {
+      return ctx.reply("❌ Eso no parece un link de YouTube. Envíame un link válido:");
+    }
+    session.url = text;
+    session.step = "waiting_start";
+    return ctx.reply(
+      "⏱ Paso 2/3 — ¿Desde qué momento? Envía el tiempo de inicio:\n\n_Ejemplo: `1:30` (minuto 1, segundo 30)_",
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  if (session.step === "waiting_start") {
+    let startSec: number;
+    try {
+      startSec = parseTime(text);
+    } catch {
+      return ctx.reply(
+        "❌ Formato inválido. Usa `mm:ss` o `hh:mm:ss`\n_Ejemplo: `1:30` o `0:45`_",
+        { parse_mode: "Markdown" }
+      );
+    }
+    session.startSec = startSec;
+    session.startStr = text;
+    session.step = "waiting_end";
+    return ctx.reply(
+      `⏱ Paso 3/3 — ¿Hasta qué momento? Envía el tiempo de fin:\n\n_Inicio: \`${text}\`_`,
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  if (session.step === "waiting_end") {
+    let endSec: number;
+    try {
+      endSec = parseTime(text);
+    } catch {
+      return ctx.reply(
+        "❌ Formato inválido. Usa `mm:ss` o `hh:mm:ss`\n_Ejemplo: `2:00` o `1:15`_",
+        { parse_mode: "Markdown" }
+      );
+    }
+
+    const startSec = session.startSec!;
+    const startStr = session.startStr!;
+    const url = session.url!;
+
+    if (endSec <= startSec) {
+      return ctx.reply(
+        `❌ El tiempo de fin (\`${text}\`) debe ser mayor que el inicio (\`${startStr}\`). Envía otro tiempo de fin:`,
+        { parse_mode: "Markdown" }
+      );
+    }
+
+    const duration = endSec - startSec;
+    if (duration > 180) {
+      return ctx.reply(
+        `❌ El clip dura ${formatDuration(duration)}, máximo permitido es 3 minutos. Envía un tiempo de fin menor:`
+      );
+    }
+
+    resetSession(chatId);
+    await processClip(ctx, url, startSec, startStr, endSec, text);
+  }
 });
 
 export async function startBot() {
