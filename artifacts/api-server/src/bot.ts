@@ -118,33 +118,105 @@ async function processClip(
       `⬇️ Descargando video...\n⏱ ${startStr} → ${endStr}`
     );
 
-    const ytdlpClients = ["ios", "android", "web_embedded", "web"];
-    let downloadError: Error | null = null;
+    const clients = ["ios", "android", "web_embedded", "web"];
+    let downloaded = false;
 
-    for (const client of ytdlpClients) {
+    // Intento 1: descarga directa con secciones (rápido, funciona para videos normales)
+    for (const client of clients) {
       try {
         await execAsync(
           `yt-dlp --extractor-args "youtube:player_client=${client}" ${cookiesFlag} ` +
-            `-f "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best[ext=mp4]/best" ` +
+            `-f "bestvideo[height<=720][protocol!=m3u8][protocol!=m3u8_native]+bestaudio/` +
+            `bestvideo[height<=720]+bestaudio/best[height<=720]/best" ` +
             `--merge-output-format mp4 ` +
             `--download-sections "*${startSec}-${endSec}" ` +
             `--force-keyframes-at-cuts ` +
             `-o "${rawFile}" "${url}"`,
           { timeout: 120000 }
         );
-        downloadError = null;
+        downloaded = true;
+        logger.info({ client, method: "sections-nokeyframes" }, "Download succeeded");
         break;
       } catch (e: any) {
-        logger.warn({ client, err: e.message }, "yt-dlp client failed, trying next");
-        downloadError = e;
+        logger.warn({ client, method: "sections" }, "sections method failed, trying next client");
         await cleanupFiles([rawFile]);
       }
     }
 
-    if (downloadError) throw downloadError;
+    // Intento 2: sin force-keyframes (para streams HLS donde ffmpeg no puede acceder segmentos)
+    if (!downloaded) {
+      for (const client of clients) {
+        try {
+          await execAsync(
+            `yt-dlp --extractor-args "youtube:player_client=${client}" ${cookiesFlag} ` +
+              `-f "best[height<=720]/best" ` +
+              `--merge-output-format mp4 ` +
+              `--download-sections "*${startSec}-${endSec}" ` +
+              `-o "${rawFile}" "${url}"`,
+            { timeout: 120000 }
+          );
+          downloaded = true;
+          logger.info({ client, method: "sections-nofkac" }, "Download succeeded");
+          break;
+        } catch (e: any) {
+          logger.warn({ client, method: "sections-nofkac" }, "failed, trying next");
+          await cleanupFiles([rawFile]);
+        }
+      }
+    }
 
-    if (!fs.existsSync(rawFile)) {
-      throw new Error("No se pudo descargar el video");
+    // Intento 3: descarga completa con yt-dlp nativo + recorte posterior con ffmpeg local
+    if (!downloaded) {
+      logger.info("Falling back to full download + local trim");
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        undefined,
+        `⬇️ Descargando stream completo (puede tardar más)...\n⏱ ${startStr} → ${endStr}`
+      );
+
+      const fullFile = path.join(os.tmpdir(), `yt_full_${Date.now()}.mp4`);
+      try {
+        for (const client of clients) {
+          try {
+            await execAsync(
+              `yt-dlp --extractor-args "youtube:player_client=${client}" ${cookiesFlag} ` +
+                `-f "best[height<=480]/best" ` +
+                `--merge-output-format mp4 ` +
+                `--max-filesize 400M ` +
+                `-o "${fullFile}" "${url}"`,
+              { timeout: 300000 }
+            );
+            downloaded = true;
+            logger.info({ client, method: "full-download" }, "Full download succeeded");
+            break;
+          } catch (e: any) {
+            logger.warn({ client, method: "full-download" }, "Full download client failed");
+            await cleanupFiles([fullFile]);
+          }
+        }
+
+        if (downloaded && fs.existsSync(fullFile)) {
+          await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            undefined,
+            `✂️ Recortando clip del stream...`
+          );
+          await execAsync(
+            `ffmpeg -y -i "${fullFile}" -ss ${startSec} -t ${duration} -c:v libx264 -c:a aac -preset fast "${rawFile}"`,
+            { timeout: 120000 }
+          );
+          await cleanupFiles([fullFile]);
+        }
+      } catch (e: any) {
+        await cleanupFiles([fullFile]);
+        throw e;
+      }
+    }
+
+    if (!downloaded || !fs.existsSync(rawFile)) {
+      throw new Error("No se pudo descargar el video con ningún método disponible");
     }
 
     await ctx.telegram.editMessageText(
