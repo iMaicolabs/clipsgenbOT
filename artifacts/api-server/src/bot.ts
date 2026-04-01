@@ -1,4 +1,5 @@
 import { Telegraf } from "telegraf";
+import { spawn } from "child_process";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
@@ -62,6 +63,11 @@ function formatDuration(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+function progressBar(pct: number, total = 10): string {
+  const filled = Math.round((pct / 100) * total);
+  return "▓".repeat(filled) + "░".repeat(total - filled);
+}
+
 async function cleanupFiles(files: string[]) {
   for (const f of files) {
     try {
@@ -87,6 +93,116 @@ function downloadFile(url: string, dest: string): Promise<void> {
   });
 }
 
+interface ProgressInfo {
+  percent: number;
+  size: string;
+  speed: string;
+  eta: string;
+}
+
+function parseYtdlpProgress(line: string): ProgressInfo | null {
+  const match = line.match(
+    /\[download\]\s+([\d.]+)%\s+of\s+~?([\d.]+\w+)\s+at\s+([\d.]+\w+\/s)\s+ETA\s+(\S+)/
+  );
+  if (!match) return null;
+  return {
+    percent: parseFloat(match[1]),
+    size: match[2],
+    speed: match[3],
+    eta: match[4],
+  };
+}
+
+function spawnYtdlp(
+  args: string[],
+  onProgress: (info: ProgressInfo) => void,
+  timeoutMs = 180000
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("yt-dlp", args, { shell: false });
+    let stderr = "";
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGTERM");
+      reject(new Error("TIMEOUT"));
+    }, timeoutMs);
+
+    proc.stdout.on("data", (data: Buffer) => {
+      const lines = data.toString().split("\n");
+      for (const line of lines) {
+        const info = parseYtdlpProgress(line);
+        if (info) onProgress(info);
+      }
+    });
+
+    proc.stderr.on("data", (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) return;
+      if (code === 0) {
+        resolve();
+      } else {
+        const err: any = new Error(`yt-dlp exited with code ${code}`);
+        err.stderr = stderr;
+        reject(err);
+      }
+    });
+
+    proc.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+async function tryYtdlpDownload(
+  args: string[],
+  outputFile: string,
+  onProgress: (info: ProgressInfo) => void,
+  timeoutMs = 180000
+): Promise<boolean> {
+  try {
+    await spawnYtdlp(args, onProgress, timeoutMs);
+    return fs.existsSync(outputFile) && fs.statSync(outputFile).size > 0;
+  } catch {
+    await cleanupFiles([outputFile]);
+    return false;
+  }
+}
+
+async function updateProgress(
+  ctx: any,
+  chatId: number,
+  msgId: number,
+  info: ProgressInfo,
+  startStr: string,
+  endStr: string,
+  lastUpdateRef: { pct: number; time: number }
+) {
+  const now = Date.now();
+  const pctDiff = Math.abs(info.percent - lastUpdateRef.pct);
+  if (pctDiff < 10 && now - lastUpdateRef.time < 5000) return;
+
+  lastUpdateRef.pct = info.percent;
+  lastUpdateRef.time = now;
+
+  const bar = progressBar(info.percent);
+  const text =
+    `⬇️ Descargando...\n` +
+    `${bar} ${info.percent.toFixed(0)}%\n` +
+    `📦 ${info.size} • ${info.speed} • ETA ${info.eta}\n` +
+    `⏱ ${startStr} → ${endStr}`;
+
+  try {
+    await ctx.telegram.editMessageText(chatId, msgId, undefined, text);
+  } catch {}
+}
+
 async function processClip(
   ctx: any,
   url: string,
@@ -101,108 +217,109 @@ async function processClip(
   const rawFile = path.join(tmpDir, `yt_raw_${timestamp}.mp4`);
   const clipFile = path.join(tmpDir, `yt_clip_${timestamp}.mp4`);
 
-  const cookiesFlag = hasCookies() ? `--cookies "${COOKIES_PATH}"` : "";
+  const cookiesArgs = hasCookies() ? ["--cookies", COOKIES_PATH] : [];
 
   const statusMsg = await ctx.reply(
     `⏳ Procesando clip...\n⏱ ${startStr} → ${endStr} (${formatDuration(duration)})` +
     (hasCookies() ? "\n🍪 Usando cookies de YouTube" : "")
   );
+  const chatId = ctx.chat.id;
+  const msgId = statusMsg.message_id;
+
+  const lastUpdate = { pct: -20, time: 0 };
+
+  const makeProgressHandler = () => (info: ProgressInfo) => {
+    updateProgress(ctx, chatId, msgId, info, startStr, endStr, lastUpdate).catch(() => {});
+  };
 
   try {
     logger.info({ url, startSec, endSec, hasCookies: hasCookies() }, "Downloading YouTube video");
 
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      undefined,
-      `⬇️ Descargando video...\n⏱ ${startStr} → ${endStr}`
+    await ctx.telegram.editMessageText(chatId, msgId, undefined,
+      `⬇️ Descargando...\n░░░░░░░░░░ 0%\n⏱ ${startStr} → ${endStr}`
     );
 
-    const clients = ["ios", "android", "web_embedded", "web"];
     let downloaded = false;
 
-    // Intento 1: descarga directa con secciones (rápido, funciona para videos normales)
+    // Intento 1: sección directa sin HLS (rápido para videos normales)
+    const clients = ["ios", "android", "web_embedded", "web"];
     for (const client of clients) {
-      try {
-        await execAsync(
-          `yt-dlp --extractor-args "youtube:player_client=${client}" ${cookiesFlag} ` +
-            `-f "bestvideo[height<=720][protocol!=m3u8][protocol!=m3u8_native]+bestaudio/` +
-            `bestvideo[height<=720]+bestaudio/best[height<=720]/best" ` +
-            `--merge-output-format mp4 ` +
-            `--download-sections "*${startSec}-${endSec}" ` +
-            `--force-keyframes-at-cuts ` +
-            `-o "${rawFile}" "${url}"`,
-          { timeout: 120000 }
-        );
+      const args = [
+        "--extractor-args", `youtube:player_client=${client}`,
+        ...cookiesArgs,
+        "-f", "bestvideo[height<=720][protocol!=m3u8][protocol!=m3u8_native]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+        "--merge-output-format", "mp4",
+        "--download-sections", `*${startSec}-${endSec}`,
+        "--force-keyframes-at-cuts",
+        "--newline",
+        "-o", rawFile,
+        url,
+      ];
+      const ok = await tryYtdlpDownload(args, rawFile, makeProgressHandler(), 120000);
+      if (ok) {
         downloaded = true;
-        logger.info({ client, method: "sections-nokeyframes" }, "Download succeeded");
+        logger.info({ client, method: "sections" }, "Download succeeded");
         break;
-      } catch (e: any) {
-        logger.warn({ client, method: "sections" }, "sections method failed, trying next client");
-        await cleanupFiles([rawFile]);
       }
+      logger.warn({ client, method: "sections" }, "failed, trying next");
     }
 
-    // Intento 2: sin force-keyframes (para streams HLS donde ffmpeg no puede acceder segmentos)
+    // Intento 2: sección sin force-keyframes (para HLS nativos)
     if (!downloaded) {
       for (const client of clients) {
-        try {
-          await execAsync(
-            `yt-dlp --extractor-args "youtube:player_client=${client}" ${cookiesFlag} ` +
-              `-f "best[height<=720]/best" ` +
-              `--merge-output-format mp4 ` +
-              `--download-sections "*${startSec}-${endSec}" ` +
-              `-o "${rawFile}" "${url}"`,
-            { timeout: 120000 }
-          );
+        const args = [
+          "--extractor-args", `youtube:player_client=${client}`,
+          ...cookiesArgs,
+          "-f", "best[height<=720]/best",
+          "--merge-output-format", "mp4",
+          "--download-sections", `*${startSec}-${endSec}`,
+          "--newline",
+          "-o", rawFile,
+          url,
+        ];
+        const ok = await tryYtdlpDownload(args, rawFile, makeProgressHandler(), 120000);
+        if (ok) {
           downloaded = true;
           logger.info({ client, method: "sections-nofkac" }, "Download succeeded");
           break;
-        } catch (e: any) {
-          logger.warn({ client, method: "sections-nofkac" }, "failed, trying next");
-          await cleanupFiles([rawFile]);
         }
+        logger.warn({ client, method: "sections-nofkac" }, "failed, trying next");
       }
     }
 
-    // Intento 3: descarga completa con yt-dlp nativo + recorte posterior con ffmpeg local
+    // Intento 3: descarga completa + recorte local con ffmpeg
     if (!downloaded) {
       logger.info("Falling back to full download + local trim");
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        undefined,
-        `⬇️ Descargando stream completo (puede tardar más)...\n⏱ ${startStr} → ${endStr}`
+      await ctx.telegram.editMessageText(chatId, msgId, undefined,
+        `⬇️ Descargando stream...\n░░░░░░░░░░ 0%\n⏱ ${startStr} → ${endStr}\n_(Stream live — esto puede tardar más)_`
       );
+      lastUpdate.pct = -20;
+      lastUpdate.time = 0;
 
-      const fullFile = path.join(os.tmpdir(), `yt_full_${Date.now()}.mp4`);
+      const fullFile = path.join(tmpDir, `yt_full_${timestamp}.mp4`);
       try {
         for (const client of clients) {
-          try {
-            await execAsync(
-              `yt-dlp --extractor-args "youtube:player_client=${client}" ${cookiesFlag} ` +
-                `-f "best[height<=480]/best" ` +
-                `--merge-output-format mp4 ` +
-                `--max-filesize 400M ` +
-                `-o "${fullFile}" "${url}"`,
-              { timeout: 300000 }
-            );
+          const args = [
+            "--extractor-args", `youtube:player_client=${client}`,
+            ...cookiesArgs,
+            "-f", "best[height<=480]/best",
+            "--merge-output-format", "mp4",
+            "--max-filesize", "400M",
+            "--newline",
+            "-o", fullFile,
+            url,
+          ];
+          const ok = await tryYtdlpDownload(args, fullFile, makeProgressHandler(), 300000);
+          if (ok) {
             downloaded = true;
             logger.info({ client, method: "full-download" }, "Full download succeeded");
             break;
-          } catch (e: any) {
-            logger.warn({ client, method: "full-download" }, "Full download client failed");
-            await cleanupFiles([fullFile]);
           }
+          logger.warn({ client, method: "full-download" }, "failed, trying next");
         }
 
         if (downloaded && fs.existsSync(fullFile)) {
-          await ctx.telegram.editMessageText(
-            ctx.chat.id,
-            statusMsg.message_id,
-            undefined,
-            `✂️ Recortando clip del stream...`
-          );
+          await ctx.telegram.editMessageText(chatId, msgId, undefined, `✂️ Recortando clip del stream...`);
           await execAsync(
             `ffmpeg -y -i "${fullFile}" -ss ${startSec} -t ${duration} -c:v libx264 -c:a aac -preset fast "${rawFile}"`,
             { timeout: 120000 }
@@ -216,17 +333,14 @@ async function processClip(
     }
 
     if (!downloaded || !fs.existsSync(rawFile)) {
-      throw new Error("No se pudo descargar el video con ningún método disponible");
+      throw new Error(
+        "LIVE_NOT_READY: El stream de YouTube Live todavía no está archivado o los segmentos no están disponibles. " +
+        "Espera unos minutos después de que termine el directo e intenta de nuevo."
+      );
     }
 
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      undefined,
-      `✂️ Recortando clip...`
-    );
-
-    logger.info({ rawFile, clipFile, startSec, duration }, "Trimming video");
+    await ctx.telegram.editMessageText(chatId, msgId, undefined, `✂️ Recortando clip...`);
+    logger.info({ rawFile, clipFile, duration }, "Trimming video");
 
     await execAsync(
       `ffmpeg -y -i "${rawFile}" -ss 0 -t ${duration} -c:v libx264 -c:a aac -preset fast "${clipFile}"`,
@@ -242,18 +356,12 @@ async function processClip(
 
     if (sizeMB > 50) {
       await cleanupFiles([rawFile, clipFile]);
-      return ctx.telegram.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        undefined,
+      return ctx.telegram.editMessageText(chatId, msgId, undefined,
         `❌ El clip pesa ${sizeMB.toFixed(1)}MB, excede el límite de 50MB de Telegram. Prueba con un clip más corto.`
       );
     }
 
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      undefined,
+    await ctx.telegram.editMessageText(chatId, msgId, undefined,
       `📤 Enviando clip (${sizeMB.toFixed(1)}MB)...`
     );
 
@@ -264,30 +372,35 @@ async function processClip(
       { caption: `🎬 Clip: ${startStr} → ${endStr}` }
     );
 
-    await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id);
+    await ctx.telegram.deleteMessage(chatId, msgId).catch(() => {});
   } catch (err: any) {
     logger.error({ err, url }, "Error processing clip");
     const msg = err.stderr || err.message || "Error desconocido";
-    const needsCookies = msg.includes("Sign in") || msg.includes("bot");
-    const friendly = needsCookies
-      ? `YouTube requiere autenticación para este video.\n\nEnvía /cookies para ver cómo configurar las cookies de YouTube y desbloquear la descarga de videos /live y otros restringidos.`
-      : msg.includes("unavailable") || msg.includes("Private")
-        ? "El video no está disponible o es privado."
-        : msg.includes("age")
-          ? "El video tiene restricción de edad."
-          : msg.includes("timeout")
-            ? "El proceso tardó demasiado. Intenta con un clip más corto."
-            : "No se pudo procesar el clip. Verifica el link e intenta de nuevo.";
+
+    let friendly: string;
+    if (msg.includes("LIVE_NOT_READY") || msg.includes("LIVE_NOT_READY:")) {
+      friendly =
+        "⏳ *El stream de YouTube Live todavía no está disponible para descargar.*\n\n" +
+        "YouTube tarda unos minutos (a veces horas) en archivar el video después de que termina el directo.\n\n" +
+        "Espera un momento e intenta de nuevo con /clip.";
+    } else if (msg.includes("Sign in") || msg.includes("bot") || msg.includes("cookies")) {
+      friendly =
+        "🔒 YouTube requiere autenticación para este video.\n\n" +
+        "Usa /cookies para configurar las cookies de YouTube.";
+    } else if (msg.includes("unavailable") || msg.includes("Private")) {
+      friendly = "❌ El video no está disponible o es privado.";
+    } else if (msg.includes("age")) {
+      friendly = "🔞 El video tiene restricción de edad.";
+    } else if (msg.includes("TIMEOUT") || msg.includes("timeout")) {
+      friendly = "⏱ El proceso tardó demasiado. Intenta con un clip más corto o espera un momento.";
+    } else {
+      friendly = "❌ No se pudo procesar el clip. Verifica el link e intenta de nuevo.";
+    }
 
     try {
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        undefined,
-        `❌ ${friendly}`
-      );
+      await ctx.telegram.editMessageText(chatId, msgId, undefined, friendly, { parse_mode: "Markdown" });
     } catch {
-      await ctx.reply(`❌ ${friendly}`);
+      await ctx.reply(friendly, { parse_mode: "Markdown" });
     }
   } finally {
     await cleanupFiles([rawFile, clipFile]);
@@ -370,9 +483,7 @@ bot.on("document", async (ctx) => {
     if (stats.size < 100) {
       fs.unlinkSync(COOKIES_PATH);
       return ctx.telegram.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        undefined,
+        ctx.chat.id, statusMsg.message_id, undefined,
         "❌ El archivo de cookies parece estar vacío o incompleto. Exporta de nuevo."
       );
     }
@@ -380,17 +491,14 @@ bot.on("document", async (ctx) => {
     logger.info({ size: stats.size }, "Cookies saved");
 
     await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      undefined,
-      `✅ *Cookies guardadas correctamente* (${(stats.size / 1024).toFixed(1)} KB)\n\nAhora puedes descargar videos /live y otros restringidos. Usa /clip para continuar.`
+      ctx.chat.id, statusMsg.message_id, undefined,
+      `✅ *Cookies guardadas correctamente* (${(stats.size / 1024).toFixed(1)} KB)\n\nAhora puedes descargar videos /live y otros restringidos. Usa /clip para continuar.`,
+      { parse_mode: "Markdown" }
     );
   } catch (err: any) {
     logger.error({ err }, "Failed to save cookies");
     await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      undefined,
+      ctx.chat.id, statusMsg.message_id, undefined,
       "❌ No se pudo guardar el archivo. Intenta de nuevo."
     );
   }
@@ -473,6 +581,11 @@ bot.on("text", async (ctx) => {
 });
 
 export async function startBot() {
+  bot.catch((err, ctx) => {
+    logger.error({ err }, "Unhandled bot error");
+    ctx.reply("❌ Ocurrió un error inesperado. Intenta de nuevo con /clip.").catch(() => {});
+  });
+
   try {
     await bot.telegram.setMyCommands([
       { command: "clip", description: "🎬 Crear un clip de YouTube" },
