@@ -48,6 +48,22 @@ Every package extends `tsconfig.base.json` which sets `composite: true`. The roo
 - `pnpm run build` — runs `typecheck` first, then recursively runs `build` in all packages that define it
 - `pnpm run typecheck` — runs `tsc --build --emitDeclarationOnly` using project references
 
+## Telegram Bot
+
+A YouTube clip bot runs alongside the Express server. It uses:
+- **Telegraf** for the Telegram bot framework
+- **yt-dlp** (system package) for downloading YouTube videos
+- **ffmpeg** (system package) for trimming clips
+
+### Usage
+Send `/clip <youtube_url> <start_time> <end_time>` to the bot.
+Example: `/clip https://youtu.be/dQw4w9WgXcQ 0:30 1:00`
+
+Limits: max 3 minutes per clip, max 50MB output file.
+
+### Required secrets
+- `TELEGRAM_BOT_TOKEN`: Bot token from @BotFather
+
 ## Packages
 
 ### `artifacts/api-server` (`@workspace/api-server`)
