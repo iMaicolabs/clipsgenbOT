@@ -27,7 +27,13 @@ function isOwner(chatId: number): boolean {
   return chatId === OWNER_ID;
 }
 
-type Step = "idle" | "waiting_url" | "waiting_start" | "waiting_end";
+type Step =
+  | "idle"
+  | "waiting_url"
+  | "waiting_start"
+  | "waiting_end"
+  | "waiting_live_url"
+  | "waiting_record_duration";
 
 interface UserSession {
   step: Step;
@@ -407,6 +413,123 @@ async function processClip(
   }
 }
 
+async function processRecording(ctx: any, url: string, durationSec: number) {
+  const tmpDir = os.tmpdir();
+  const timestamp = Date.now();
+  const outFile = path.join(tmpDir, `yt_live_${timestamp}.mp4`);
+  const cookiesArgs = hasCookies() ? ["--cookies", COOKIES_PATH] : [];
+  const chatId = ctx.chat.id;
+
+  const statusMsg = await ctx.reply(
+    `🔴 *Preparando grabación...*\n⏱ Duración: ${formatDuration(durationSec)}`,
+    { parse_mode: "Markdown" }
+  );
+  const msgId = statusMsg.message_id;
+
+  try {
+    // Obtener la URL del stream HLS con yt-dlp
+    await ctx.telegram.editMessageText(chatId, msgId, undefined,
+      `🔍 Obteniendo URL del stream...`
+    );
+
+    logger.info({ url, durationSec }, "Getting live stream URL");
+
+    const { stdout } = await execAsync(
+      `yt-dlp ${cookiesArgs.map(a => `"${a}"`).join(" ")} ` +
+      `-f "best[height<=480]/best" --get-url "${url}"`,
+      { timeout: 30000 }
+    );
+
+    const streamUrl = stdout.trim().split("\n")[0];
+    if (!streamUrl || !streamUrl.startsWith("http")) {
+      throw new Error("No se pudo obtener la URL del stream en vivo.");
+    }
+
+    logger.info({ streamUrl: streamUrl.slice(0, 80) + "..." }, "Got stream URL, starting recording");
+
+    // Mostrar cuenta regresiva mientras graba
+    await ctx.telegram.editMessageText(chatId, msgId, undefined,
+      `🔴 *Grabando en vivo...*\n⏳ ${formatDuration(durationSec)} restantes\n\n_No cierres el chat, te envío el clip al terminar._`,
+      { parse_mode: "Markdown" }
+    );
+
+    // Actualizar contador cada 15 segundos
+    let elapsed = 0;
+    const countdownInterval = setInterval(async () => {
+      elapsed += 15;
+      const remaining = Math.max(0, durationSec - elapsed);
+      try {
+        await ctx.telegram.editMessageText(chatId, msgId, undefined,
+          `🔴 *Grabando en vivo...*\n⏳ ${formatDuration(remaining)} restantes\n\n_No cierres el chat, te envío el clip al terminar._`,
+          { parse_mode: "Markdown" }
+        );
+      } catch {}
+    }, 15000);
+
+    // Grabar con ffmpeg directamente de la URL HLS
+    try {
+      await execAsync(
+        `ffmpeg -y -i "${streamUrl}" -t ${durationSec} ` +
+        `-c:v libx264 -preset fast -crf 28 -c:a aac -movflags +faststart "${outFile}"`,
+        { timeout: (durationSec + 60) * 1000 }
+      );
+    } finally {
+      clearInterval(countdownInterval);
+    }
+
+    if (!fs.existsSync(outFile) || fs.statSync(outFile).size === 0) {
+      throw new Error("La grabación falló o el archivo está vacío.");
+    }
+
+    const stats = fs.statSync(outFile);
+    const sizeMB = stats.size / (1024 * 1024);
+
+    if (sizeMB > 50) {
+      await cleanupFiles([outFile]);
+      return ctx.telegram.editMessageText(chatId, msgId, undefined,
+        `❌ La grabación pesa ${sizeMB.toFixed(1)}MB, excede el límite de 50MB de Telegram. Prueba con menos tiempo.`
+      );
+    }
+
+    await ctx.telegram.editMessageText(chatId, msgId, undefined,
+      `📤 Enviando grabación (${sizeMB.toFixed(1)}MB)...`
+    );
+
+    logger.info({ outFile, sizeMB }, "Sending live recording");
+
+    await ctx.replyWithVideo(
+      { source: outFile },
+      { caption: `🔴 Grabación en vivo — ${formatDuration(durationSec)}` }
+    );
+
+    await ctx.telegram.deleteMessage(chatId, msgId).catch(() => {});
+  } catch (err: any) {
+    logger.error({ err, url }, "Error recording live stream");
+    const msg = err.stderr || err.message || "";
+
+    let friendly: string;
+    if (msg.includes("403") || msg.includes("Forbidden")) {
+      friendly =
+        "❌ No se pudo acceder al stream. YouTube bloqueó la solicitud.\n\n" +
+        "Asegúrate de tener las cookies configuradas con /cookies y que el video sea público.";
+    } else if (msg.includes("live") || msg.includes("not available")) {
+      friendly = "❌ Este link no parece ser un directo activo en este momento.";
+    } else if (msg.includes("timeout") || msg.includes("TIMEOUT")) {
+      friendly = "⏱ La grabación tardó demasiado. Intenta de nuevo.";
+    } else {
+      friendly = "❌ No se pudo grabar el stream. Verifica que el link sea de un YouTube Live activo.";
+    }
+
+    try {
+      await ctx.telegram.editMessageText(chatId, msgId, undefined, friendly);
+    } catch {
+      await ctx.reply(friendly);
+    }
+  } finally {
+    await cleanupFiles([outFile]);
+  }
+}
+
 bot.command("start", (ctx) => {
   resetSession(ctx.chat.id);
   ctx.reply(
@@ -414,8 +537,9 @@ bot.command("start", (ctx) => {
     `Este bot te permite recortar fragmentos de cualquier video de YouTube y recibirlos directamente aquí en Telegram.\n\n` +
     `Solo indícame el link del video y los tiempos de inicio y fin, y te envío el clip listo.\n\n` +
     `📌 *Comandos:*\n` +
-    `/clip — Crear un nuevo clip\n` +
-    `/cookies — Configurar cookies (necesario para videos /live)\n` +
+    `/clip — Recortar un fragmento de un video\n` +
+    `/grabar — Grabar los próximos minutos de un directo\n` +
+    `/cookies — Configurar cookies (para videos /live)\n` +
     `/cancelar — Cancelar la operación actual\n\n` +
     `_Creado por @iMaicol_`,
     { parse_mode: "Markdown" }
@@ -457,6 +581,23 @@ bot.command("clip", (ctx) => {
 bot.command("miid", (ctx) => {
   ctx.reply(
     `🪪 Tu ID de Telegram es:\n\n\`${ctx.chat.id}\`\n\nCopia este número y dáselo al administrador del bot para activar permisos especiales.`,
+    { parse_mode: "Markdown" }
+  );
+});
+
+bot.command("grabar", (ctx) => {
+  if (!hasCookies()) {
+    return ctx.reply(
+      "⚠️ Para grabar un YouTube Live necesitas tener las cookies configuradas.\n\nUsa /cookies para ver las instrucciones."
+    );
+  }
+  const session = getSession(ctx.chat.id);
+  session.step = "waiting_live_url";
+  session.url = undefined;
+  ctx.reply(
+    `🔴 *Grabar YouTube Live*\n\n` +
+    `Este comando graba los próximos minutos de un directo en tiempo real.\n\n` +
+    `📌 Paso 1/2 — Envíame el link del YouTube Live activo:`,
     { parse_mode: "Markdown" }
   );
 });
@@ -578,6 +719,33 @@ bot.on("text", async (ctx) => {
     resetSession(chatId);
     await processClip(ctx, url, startSec, startStr, endSec, text);
   }
+
+  if (session.step === "waiting_live_url") {
+    if (!text.includes("youtube.com") && !text.includes("youtu.be")) {
+      return ctx.reply("❌ Eso no parece un link de YouTube. Envíame un link válido:");
+    }
+    session.url = text;
+    session.step = "waiting_record_duration";
+    return ctx.reply(
+      `⏱ Paso 2/2 — ¿Cuántos minutos quieres grabar?\n\n` +
+      `Envía un número entre 1 y 3:\n_Ejemplo: \`2\` (graba los próximos 2 minutos)_`,
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  if (session.step === "waiting_record_duration") {
+    const mins = parseFloat(text.replace(",", "."));
+    if (isNaN(mins) || mins <= 0 || mins > 3) {
+      return ctx.reply(
+        "❌ Envía un número válido entre 1 y 3 minutos.\n_Ejemplo: `1`, `2` o `3`_",
+        { parse_mode: "Markdown" }
+      );
+    }
+    const durationSec = Math.round(mins * 60);
+    const url = session.url!;
+    resetSession(chatId);
+    await processRecording(ctx, url, durationSec);
+  }
 });
 
 export async function startBot() {
@@ -588,7 +756,8 @@ export async function startBot() {
 
   try {
     await bot.telegram.setMyCommands([
-      { command: "clip", description: "🎬 Crear un clip de YouTube" },
+      { command: "clip", description: "🎬 Recortar un fragmento de un video" },
+      { command: "grabar", description: "🔴 Grabar los próximos minutos de un directo" },
       { command: "cookies", description: "🍪 Configurar cookies (para videos /live)" },
       { command: "cancelar", description: "❌ Cancelar la operación actual" },
       { command: "miid", description: "🪪 Ver mi ID de Telegram" },
