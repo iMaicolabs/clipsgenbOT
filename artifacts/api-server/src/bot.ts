@@ -110,14 +110,30 @@ bot.command("clip", async (ctx) => {
       `⬇️ Descargando video...\n\n⏱ ${startStr} → ${endStr}`
     );
 
-    await execAsync(
-      `yt-dlp -f "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best[ext=mp4]/best" ` +
-        `--merge-output-format mp4 ` +
-        `--download-sections "*${startSec}-${endSec}" ` +
-        `--force-keyframes-at-cuts ` +
-        `-o "${rawFile}" "${url}"`,
-      { timeout: 120000 }
-    );
+    const ytdlpClients = ["ios", "android", "web_embedded"];
+    let downloadError: Error | null = null;
+
+    for (const client of ytdlpClients) {
+      try {
+        await execAsync(
+          `yt-dlp --extractor-args "youtube:player_client=${client}" ` +
+            `-f "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best[ext=mp4]/best" ` +
+            `--merge-output-format mp4 ` +
+            `--download-sections "*${startSec}-${endSec}" ` +
+            `--force-keyframes-at-cuts ` +
+            `-o "${rawFile}" "${url}"`,
+          { timeout: 120000 }
+        );
+        downloadError = null;
+        break;
+      } catch (e: any) {
+        logger.warn({ client, err: e.message }, "yt-dlp client failed, trying next");
+        downloadError = e;
+        await cleanupFiles([rawFile]);
+      }
+    }
+
+    if (downloadError) throw downloadError;
 
     if (!fs.existsSync(rawFile)) {
       throw new Error("No se pudo descargar el video");
@@ -172,13 +188,15 @@ bot.command("clip", async (ctx) => {
   } catch (err: any) {
     logger.error({ err, url }, "Error processing clip");
     const msg = err.stderr || err.message || "Error desconocido";
-    const friendly = msg.includes("unavailable")
-      ? "El video no está disponible o es privado."
-      : msg.includes("age")
-        ? "El video tiene restricción de edad."
-        : msg.includes("timeout")
-          ? "El proceso tardó demasiado. Intenta con un clip más corto."
-          : "No se pudo procesar el clip. Verifica el link e intenta de nuevo.";
+    const friendly = msg.includes("Sign in") || msg.includes("bot")
+      ? "YouTube está bloqueando la descarga. Intenta con otro video o espera unos minutos."
+      : msg.includes("unavailable") || msg.includes("Private")
+        ? "El video no está disponible o es privado."
+        : msg.includes("age")
+          ? "El video tiene restricción de edad."
+          : msg.includes("timeout")
+            ? "El proceso tardó demasiado. Intenta con un clip más corto."
+            : "No se pudo procesar el clip. Verifica el link e intenta de nuevo.";
 
     try {
       await ctx.telegram.editMessageText(
