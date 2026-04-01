@@ -218,11 +218,13 @@ bot.command("start", (ctx) => {
   resetSession(ctx.chat.id);
   ctx.reply(
     `👋 *Bot de clips de YouTube*\n\n` +
-    `Envía /clip para crear un clip paso a paso.\n\n` +
+    `Este bot te permite recortar fragmentos de cualquier video de YouTube y recibirlos directamente aquí en Telegram.\n\n` +
+    `Solo indícame el link del video y los tiempos de inicio y fin, y te envío el clip listo.\n\n` +
     `📌 *Comandos:*\n` +
     `/clip — Crear un nuevo clip\n` +
     `/cookies — Configurar cookies (necesario para videos /live)\n` +
-    `/cancelar — Cancelar la operación actual`,
+    `/cancelar — Cancelar la operación actual\n\n` +
+    `_Creado por @iMaicol_`,
     { parse_mode: "Markdown" }
   );
 });
