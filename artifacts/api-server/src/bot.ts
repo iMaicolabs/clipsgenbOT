@@ -381,6 +381,12 @@ bot.on("text", async (ctx) => {
 
 export async function startBot() {
   try {
+    await bot.telegram.setMyCommands([
+      { command: "clip", description: "🎬 Crear un clip de YouTube" },
+      { command: "cookies", description: "🍪 Configurar cookies (para videos /live)" },
+      { command: "cancelar", description: "❌ Cancelar la operación actual" },
+      { command: "start", description: "👋 Ver bienvenida y ayuda" },
+    ]);
     await bot.launch();
     logger.info("Telegram bot started (polling)");
   } catch (err) {
