@@ -2,6 +2,7 @@ import { Telegraf } from "telegraf";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
+import https from "https";
 import path from "path";
 import os from "os";
 import { logger } from "./lib/logger";
@@ -14,6 +15,8 @@ if (!token) {
 }
 
 export const bot = new Telegraf(token);
+
+const COOKIES_PATH = path.join("/home/runner/workspace/data", "yt_cookies.txt");
 
 type Step = "idle" | "waiting_url" | "waiting_start" | "waiting_end";
 
@@ -59,6 +62,23 @@ async function cleanupFiles(files: string[]) {
   }
 }
 
+function hasCookies(): boolean {
+  return fs.existsSync(COOKIES_PATH) && fs.statSync(COOKIES_PATH).size > 100;
+}
+
+function downloadFile(url: string, dest: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    https.get(url, (res) => {
+      res.pipe(file);
+      file.on("finish", () => file.close(() => resolve()));
+    }).on("error", (err) => {
+      fs.unlink(dest, () => {});
+      reject(err);
+    });
+  });
+}
+
 async function processClip(
   ctx: any,
   url: string,
@@ -73,12 +93,15 @@ async function processClip(
   const rawFile = path.join(tmpDir, `yt_raw_${timestamp}.mp4`);
   const clipFile = path.join(tmpDir, `yt_clip_${timestamp}.mp4`);
 
+  const cookiesFlag = hasCookies() ? `--cookies "${COOKIES_PATH}"` : "";
+
   const statusMsg = await ctx.reply(
-    `⏳ Procesando clip...\n⏱ ${startStr} → ${endStr} (${formatDuration(duration)})`
+    `⏳ Procesando clip...\n⏱ ${startStr} → ${endStr} (${formatDuration(duration)})` +
+    (hasCookies() ? "\n🍪 Usando cookies de YouTube" : "")
   );
 
   try {
-    logger.info({ url, startSec, endSec }, "Downloading YouTube video");
+    logger.info({ url, startSec, endSec, hasCookies: hasCookies() }, "Downloading YouTube video");
 
     await ctx.telegram.editMessageText(
       ctx.chat.id,
@@ -87,13 +110,13 @@ async function processClip(
       `⬇️ Descargando video...\n⏱ ${startStr} → ${endStr}`
     );
 
-    const ytdlpClients = ["ios", "android", "web_embedded"];
+    const ytdlpClients = ["ios", "android", "web_embedded", "web"];
     let downloadError: Error | null = null;
 
     for (const client of ytdlpClients) {
       try {
         await execAsync(
-          `yt-dlp --extractor-args "youtube:player_client=${client}" ` +
+          `yt-dlp --extractor-args "youtube:player_client=${client}" ${cookiesFlag} ` +
             `-f "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best[ext=mp4]/best" ` +
             `--merge-output-format mp4 ` +
             `--download-sections "*${startSec}-${endSec}" ` +
@@ -165,8 +188,9 @@ async function processClip(
   } catch (err: any) {
     logger.error({ err, url }, "Error processing clip");
     const msg = err.stderr || err.message || "Error desconocido";
-    const friendly = msg.includes("Sign in") || msg.includes("bot")
-      ? "YouTube está bloqueando la descarga. Intenta con otro video o espera unos minutos."
+    const needsCookies = msg.includes("Sign in") || msg.includes("bot");
+    const friendly = needsCookies
+      ? `YouTube requiere autenticación para este video.\n\nEnvía /cookies para ver cómo configurar las cookies de YouTube y desbloquear la descarga de videos /live y otros restringidos.`
       : msg.includes("unavailable") || msg.includes("Private")
         ? "El video no está disponible o es privado."
         : msg.includes("age")
@@ -193,8 +217,31 @@ async function processClip(
 bot.command("start", (ctx) => {
   resetSession(ctx.chat.id);
   ctx.reply(
-    `👋 *Bot de clips de YouTube*\n\nEnvía /clip para comenzar a crear un clip.\n\nTe voy pidiendo los datos paso a paso.`,
+    `👋 *Bot de clips de YouTube*\n\n` +
+    `Envía /clip para crear un clip paso a paso.\n\n` +
+    `📌 *Comandos:*\n` +
+    `/clip — Crear un nuevo clip\n` +
+    `/cookies — Configurar cookies (necesario para videos /live)\n` +
+    `/cancelar — Cancelar la operación actual`,
     { parse_mode: "Markdown" }
+  );
+});
+
+bot.command("cookies", (ctx) => {
+  const estado = hasCookies()
+    ? "✅ *Cookies configuradas* — las descargas de YouTube Live están habilitadas."
+    : "⚠️ *Sin cookies* — los videos /live y algunos restringidos no funcionarán.";
+
+  ctx.reply(
+    `🍪 *Configurar cookies de YouTube*\n\n${estado}\n\n` +
+    `Para descargar videos \`/live\` y otros con restricciones necesitas exportar tus cookies de YouTube.\n\n` +
+    `*Pasos:*\n` +
+    `1. Instala la extensión *"Get cookies.txt LOCALLY"* en Chrome/Edge\n` +
+    `2. Entra a [youtube.com](https://youtube.com) con tu cuenta\n` +
+    `3. Haz clic en la extensión y exporta el archivo \`cookies.txt\`\n` +
+    `4. Envíame ese archivo aquí como documento\n\n` +
+    `🔒 Las cookies se guardan solo en este servidor y se usan únicamente para descargar videos.`,
+    { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }
   );
 });
 
@@ -212,6 +259,50 @@ bot.command("clip", (ctx) => {
   ctx.reply("🔗 Paso 1/3 — Envíame el link de YouTube:");
 });
 
+bot.on("document", async (ctx) => {
+  const doc = ctx.message.document;
+  const fileName = doc.file_name?.toLowerCase() ?? "";
+
+  if (!fileName.includes("cookie") && !fileName.endsWith(".txt")) {
+    return ctx.reply('Para subir cookies, envía un archivo .txt exportado desde tu navegador.\n\nUsa /cookies para ver las instrucciones.');
+  }
+
+  const statusMsg = await ctx.reply("⏳ Guardando cookies...");
+
+  try {
+    const fileLink = await ctx.telegram.getFileLink(doc.file_id);
+    await downloadFile(fileLink.href, COOKIES_PATH);
+
+    const stats = fs.statSync(COOKIES_PATH);
+    if (stats.size < 100) {
+      fs.unlinkSync(COOKIES_PATH);
+      return ctx.telegram.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        undefined,
+        "❌ El archivo de cookies parece estar vacío o incompleto. Exporta de nuevo."
+      );
+    }
+
+    logger.info({ size: stats.size }, "Cookies saved");
+
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      undefined,
+      `✅ *Cookies guardadas correctamente* (${(stats.size / 1024).toFixed(1)} KB)\n\nAhora puedes descargar videos /live y otros restringidos. Usa /clip para continuar.`
+    );
+  } catch (err: any) {
+    logger.error({ err }, "Failed to save cookies");
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      undefined,
+      "❌ No se pudo guardar el archivo. Intenta de nuevo."
+    );
+  }
+});
+
 bot.on("text", async (ctx) => {
   const chatId = ctx.chat.id;
   const session = getSession(chatId);
@@ -220,10 +311,7 @@ bot.on("text", async (ctx) => {
   if (text.startsWith("/")) return;
 
   if (session.step === "idle") {
-    return ctx.reply(
-      "Envía /clip para crear un clip de YouTube.",
-      { parse_mode: "Markdown" }
-    );
+    return ctx.reply("Envía /clip para crear un clip de YouTube.");
   }
 
   if (session.step === "waiting_url") {
