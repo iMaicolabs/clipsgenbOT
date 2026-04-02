@@ -402,7 +402,7 @@ async function processClip(
             `✂️ <b>Recortando clip del stream...</b>`, H
           );
           await execAsync(
-            `ffmpeg -y -i "${fullFile}" -ss ${startSec} -t ${duration} -c:v libx264 -c:a aac -preset fast "${rawFile}"`,
+            `ffmpeg -y -i "${fullFile}" -ss ${startSec} -t ${duration} -map 0 -c:v libx264 -c:a aac -preset fast "${rawFile}"`,
             { timeout: 120000 }
           );
           await cleanupFiles([fullFile]);
@@ -422,12 +422,40 @@ async function processClip(
       `🎬 <code>${esc(startStr)}</code> → <code>${esc(endStr)}</code>`,
       H
     );
-    logger.info({ rawFile, clipFile, duration }, "Trimming video");
 
-    await execAsync(
-      `ffmpeg -y -i "${rawFile}" -ss 0 -t ${duration} -c:v libx264 -c:a aac -preset fast "${clipFile}"`,
-      { timeout: 60000 }
-    );
+    // Check if raw file has audio stream before trimming
+    const probeOut = await execAsync(`ffprobe -v quiet -print_format json -show_streams "${rawFile}"`, { timeout: 10000 }).catch(() => ({ stdout: "{}" }));
+    const probeData = JSON.parse((probeOut as any).stdout || "{}");
+    const hasAudio = (probeData.streams || []).some((s: any) => s.codec_type === "audio");
+    logger.info({ rawFile, clipFile, duration, hasAudio }, "Trimming video");
+
+    if (hasAudio) {
+      // Stream copy — preserves original quality, keeps all streams including audio
+      await execAsync(
+        `ffmpeg -y -i "${rawFile}" -ss 0 -t ${duration} -map 0 -c copy -movflags +faststart "${clipFile}"`,
+        { timeout: 60000 }
+      );
+    } else {
+      // No audio in raw — re-download audio separately and mux
+      logger.warn({ rawFile }, "No audio in raw file, attempting audio re-download");
+      const audioFile = rawFile.replace(".mp4", "_audio.m4a");
+      const jsArgs2 = ["--js-runtimes", `node:${NODE_BIN}`, ...cookiesArgs];
+      const audioArgs = [...jsArgs2, "-f", "bestaudio[ext=m4a]/bestaudio", "--download-sections", `*${startSec}-${endSec}`, "-o", audioFile, url];
+      const gotAudio = await tryYtdlpDownload(audioArgs, audioFile, () => {}, 60000, duration);
+      if (gotAudio) {
+        await execAsync(
+          `ffmpeg -y -i "${rawFile}" -i "${audioFile}" -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -shortest -movflags +faststart "${clipFile}"`,
+          { timeout: 60000 }
+        );
+        await cleanupFiles([audioFile]);
+      } else {
+        // Last resort: encode with silent audio placeholder
+        await execAsync(
+          `ffmpeg -y -i "${rawFile}" -ss 0 -t ${duration} -map 0:v:0 -c:v copy -an -movflags +faststart "${clipFile}"`,
+          { timeout: 60000 }
+        );
+      }
+    }
 
     if (!fs.existsSync(clipFile)) throw new Error("No se pudo recortar el clip");
 
