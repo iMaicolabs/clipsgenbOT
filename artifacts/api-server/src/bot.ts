@@ -1136,22 +1136,32 @@ export async function startBot() {
     ctx.reply(`❌ <b>Error inesperado</b>\n\nAlgo salió mal. Usa /clip para intentar de nuevo.`, H).catch(() => {});
   });
 
-  try {
-    await bot.telegram.setMyCommands([
-      { command: "clip", description: "✂️ Recortar un fragmento de video" },
-      { command: "grabar", description: "🔴 Grabar un directo activo" },
-      { command: "cookies", description: "🍪 Configurar cookies de YouTube" },
-      { command: "cancelar", description: "❌ Cancelar la operación actual" },
-      { command: "miid", description: "🪪 Ver mi ID de Telegram" },
-      { command: "start", description: "🎬 Bienvenida y ayuda" },
-    ]);
+  await bot.telegram.setMyCommands([
+    { command: "clip", description: "✂️ Recortar un fragmento de video" },
+    { command: "grabar", description: "🔴 Grabar un directo activo" },
+    { command: "cookies", description: "🍪 Configurar cookies de YouTube" },
+    { command: "cancelar", description: "❌ Cancelar la operación actual" },
+    { command: "miid", description: "🪪 Ver mi ID de Telegram" },
+    { command: "start", description: "🎬 Bienvenida y ayuda" },
+  ]);
+
+  const isProduction = process.env["NODE_ENV"] === "production";
+  const replitDomains = process.env["REPLIT_DOMAINS"];
+
+  if (isProduction && replitDomains) {
+    // Production: webhook mode — Telegram calls our HTTP server on every update.
+    // Works perfectly with autoscale — no need for always-on VM.
+    const domain = replitDomains.split(",")[0].trim();
+    const webhookUrl = `https://${domain}/api/telegram-webhook`;
+    await bot.telegram.setWebhook(webhookUrl, { drop_pending_updates: true });
+    logger.info({ webhookUrl }, "Telegram bot started (webhook)");
+    process.once("SIGTERM", () => bot.stop("SIGTERM"));
+  } else {
+    // Development: long polling
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
     await bot.launch();
-    logger.info("Telegram bot started (polling)");
-  } catch (err) {
-    logger.error({ err }, "Failed to start Telegram bot");
-    throw err;
+    logger.info("Telegram bot started (long polling)");
+    process.once("SIGINT", () => bot.stop("SIGINT"));
+    process.once("SIGTERM", () => bot.stop("SIGTERM"));
   }
 }
-
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));

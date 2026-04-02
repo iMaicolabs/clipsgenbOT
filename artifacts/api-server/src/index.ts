@@ -1,6 +1,14 @@
 import app from "./app";
-import { startBot } from "./bot";
+import { bot, startBot } from "./bot";
 import { logger } from "./lib/logger";
+
+// Telegram webhook endpoint (used in production)
+app.post("/api/telegram-webhook", (req, res) => {
+  bot.handleUpdate(req.body, res).catch((err) => {
+    logger.error({ err }, "Webhook handler error");
+    if (!res.headersSent) res.sendStatus(500);
+  });
+});
 
 const rawPort = process.env["PORT"];
 
