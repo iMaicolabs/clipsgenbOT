@@ -1,0 +1,13 @@
+uploads = []
+
+[[generated]]
+id = "-EFdPqpCTSfieZCBdsghK"
+uri = "file://attached_assets/bot_logo.png"
+type = "image"
+title = "youtube clip bot logo"
+
+[[outputs]]
+id = "MZrZ4xR2CYOMMy3qmu2tw"
+uri = "file://attached_assets/bot_logo.png"
+type = "image"
+title = "Logo de @ClipsGenBOT"

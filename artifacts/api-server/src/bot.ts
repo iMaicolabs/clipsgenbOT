@@ -16,6 +16,7 @@ if (!token) throw new Error("TELEGRAM_BOT_TOKEN is required");
 export const bot = new Telegraf(token);
 
 const COOKIES_PATH = path.join("/home/runner/workspace/data", "yt_cookies.txt");
+const LOGO_PATH = path.join("/home/runner/workspace/attached_assets", "bot_logo.png");
 const YTDLP_BIN = fs.existsSync("/home/runner/workspace/bin/yt-dlp")
   ? "/home/runner/workspace/bin/yt-dlp"
   : "yt-dlp";
@@ -629,9 +630,9 @@ async function processRecording(ctx: any, url: string, durationSec: number) {
   }
 }
 
-bot.command("start", (ctx) => {
+bot.command("start", async (ctx) => {
   resetSession(ctx.chat.id);
-  ctx.reply(
+  const caption =
     `🎬 <b>YouTube Clip Bot</b>\n\n` +
     `Recorta cualquier fragmento de YouTube con calidad HD y recíbelo aquí al instante.\n\n` +
     `<b>¿Qué puedo hacer?</b>\n` +
@@ -642,20 +643,24 @@ bot.command("start", (ctx) => {
     `/clip — Recortar un fragmento\n` +
     `/grabar — Grabar un directo activo\n` +
     `/cancelar — Cancelar lo que estés haciendo\n\n` +
-    `<i>Creado por @iMaicol</i>`,
-    {
-      ...H,
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: "✂️ Nuevo clip", callback_data: "start_clip" },
-            { text: "🔴 Grabar Live", callback_data: "start_grabar" },
-          ],
-          [{ text: "🍪 Configurar cookies", callback_data: "show_cookies" }],
-        ],
-      },
-    }
-  );
+    `<i>Creado por @iMaicol</i>`;
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "✂️ Nuevo clip", callback_data: "start_clip" },
+        { text: "🔴 Grabar Live", callback_data: "start_grabar" },
+      ],
+      [{ text: "🍪 Configurar cookies", callback_data: "show_cookies" }],
+    ],
+  };
+  try {
+    await ctx.replyWithPhoto(
+      { source: fs.createReadStream(LOGO_PATH) },
+      { caption, parse_mode: "HTML", reply_markup: keyboard }
+    );
+  } catch {
+    await ctx.reply(caption, { ...H, reply_markup: keyboard });
+  }
 });
 
 bot.command("cookies", (ctx) => {
