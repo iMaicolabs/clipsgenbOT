@@ -15,11 +15,17 @@ if (!token) throw new Error("TELEGRAM_BOT_TOKEN is required");
 
 export const bot = new Telegraf(token);
 
-const COOKIES_PATH = path.join("/home/runner/workspace/data", "yt_cookies.txt");
-const LOGO_PATH = path.join("/home/runner/workspace/attached_assets", "bot_logo.png");
-const YTDLP_BIN = fs.existsSync("/home/runner/workspace/bin/yt-dlp")
-  ? "/home/runner/workspace/bin/yt-dlp"
-  : "yt-dlp";
+const DATA_DIR = process.env["DATA_DIR"] ?? "/home/runner/workspace/data";
+const COOKIES_PATH = path.join(DATA_DIR, "yt_cookies.txt");
+const LOGO_PATH = path.join(
+  process.env["ASSETS_DIR"] ?? "/home/runner/workspace/attached_assets",
+  "bot_logo.png"
+);
+const YTDLP_BIN =
+  process.env["YTDLP_BIN"] ??
+  (fs.existsSync("/home/runner/workspace/bin/yt-dlp")
+    ? "/home/runner/workspace/bin/yt-dlp"
+    : "yt-dlp");
 const NODE_BIN = (() => {
   try { return execSync("which node", { encoding: "utf8" }).trim(); }
   catch { return "node"; }
@@ -1145,14 +1151,19 @@ export async function startBot() {
     { command: "start", description: "🎬 Bienvenida y ayuda" },
   ]);
 
-  const isProduction = process.env["NODE_ENV"] === "production";
-  const replitDomains = process.env["REPLIT_DOMAINS"];
+  // Detect webhook domain from multiple platforms:
+  // - WEBHOOK_DOMAIN: manual override (any platform)
+  // - RAILWAY_PUBLIC_DOMAIN: set automatically by Railway
+  // - REPLIT_DOMAINS: set automatically by Replit
+  const webhookDomain =
+    process.env["WEBHOOK_DOMAIN"] ??
+    process.env["RAILWAY_PUBLIC_DOMAIN"] ??
+    process.env["REPLIT_DOMAINS"]?.split(",")[0]?.trim();
 
-  if (isProduction && replitDomains) {
-    // Production: webhook mode — Telegram calls our HTTP server on every update.
-    // Works perfectly with autoscale — no need for always-on VM.
-    const domain = replitDomains.split(",")[0].trim();
-    const webhookUrl = `https://${domain}/api/telegram-webhook`;
+  if (webhookDomain) {
+    // Webhook mode — Telegram calls our HTTP server on every update.
+    // Works with autoscale/serverless — no always-on VM needed.
+    const webhookUrl = `https://${webhookDomain}/api/telegram-webhook`;
     await bot.telegram.setWebhook(webhookUrl, { drop_pending_updates: true });
     logger.info({ webhookUrl }, "Telegram bot started (webhook)");
     process.once("SIGTERM", () => bot.stop("SIGTERM"));

@@ -1,0 +1,32 @@
+# Dependencies (reinstalled during build)
+node_modules
+**/node_modules
+
+# Build outputs (rebuilt during Docker build)
+**/dist
+
+# Replit-specific files
+.replit
+replit.nix
+.local/
+.cache/
+
+# Development logs and temp files
+*.log
+/tmp
+
+# yt-dlp binary (installed fresh in container)
+bin/yt-dlp
+
+# Git
+.git
+.gitignore
+
+# Editor files
+.vscode
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
