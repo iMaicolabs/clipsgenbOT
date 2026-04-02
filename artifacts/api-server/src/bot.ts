@@ -1,5 +1,5 @@
 import { Telegraf } from "telegraf";
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
@@ -18,6 +18,16 @@ if (!token) {
 export const bot = new Telegraf(token);
 
 const COOKIES_PATH = path.join("/home/runner/workspace/data", "yt_cookies.txt");
+const YTDLP_BIN = fs.existsSync("/home/runner/workspace/bin/yt-dlp")
+  ? "/home/runner/workspace/bin/yt-dlp"
+  : "yt-dlp";
+const NODE_BIN = (() => {
+  try {
+    return execSync("which node", { encoding: "utf8" }).trim();
+  } catch {
+    return "node";
+  }
+})();
 const OWNER_ID = process.env.TELEGRAM_OWNER_ID
   ? Number(process.env.TELEGRAM_OWNER_ID)
   : null;
@@ -125,7 +135,7 @@ function spawnYtdlp(
   timeoutMs = 180000
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn("yt-dlp", args, { shell: false });
+    const proc = spawn(YTDLP_BIN, args, { shell: false });
     let stderr = "";
     let timedOut = false;
 
@@ -224,6 +234,7 @@ async function processClip(
   const clipFile = path.join(tmpDir, `yt_clip_${timestamp}.mp4`);
 
   const cookiesArgs = hasCookies() ? ["--cookies", COOKIES_PATH] : [];
+  const jsArgs = ["--js-runtimes", `node:${NODE_BIN}`];
 
   const statusMsg = await ctx.reply(
     `⏳ Procesando clip...\n⏱ ${startStr} → ${endStr} (${formatDuration(duration)})` +
@@ -248,12 +259,14 @@ async function processClip(
     let downloaded = false;
 
     // Intento 1: sección directa sin HLS (rápido para videos normales)
-    const clients = ["ios", "android", "web_embedded", "web"];
+    const clients = ["default", "web"];
     for (const client of clients) {
+      const clientArgs = client === "default" ? [] : ["--extractor-args", `youtube:player_client=${client}`];
       const args = [
-        "--extractor-args", `youtube:player_client=${client}`,
+        ...jsArgs,
+        ...clientArgs,
         ...cookiesArgs,
-        "-f", "bestvideo[height<=720][protocol!=m3u8][protocol!=m3u8_native]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+        "-f", "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
         "--merge-output-format", "mp4",
         "--download-sections", `*${startSec}-${endSec}`,
         "--force-keyframes-at-cuts",
@@ -273,8 +286,10 @@ async function processClip(
     // Intento 2: sección sin force-keyframes (para HLS nativos)
     if (!downloaded) {
       for (const client of clients) {
+        const clientArgs = client === "default" ? [] : ["--extractor-args", `youtube:player_client=${client}`];
         const args = [
-          "--extractor-args", `youtube:player_client=${client}`,
+          ...jsArgs,
+          ...clientArgs,
           ...cookiesArgs,
           "-f", "best[height<=720]/best",
           "--merge-output-format", "mp4",
@@ -305,8 +320,10 @@ async function processClip(
       const fullFile = path.join(tmpDir, `yt_full_${timestamp}.mp4`);
       try {
         for (const client of clients) {
+          const clientArgs = client === "default" ? [] : ["--extractor-args", `youtube:player_client=${client}`];
           const args = [
-            "--extractor-args", `youtube:player_client=${client}`,
+            ...jsArgs,
+            ...clientArgs,
             ...cookiesArgs,
             "-f", "best[height<=480]/best",
             "--merge-output-format", "mp4",
@@ -435,7 +452,7 @@ async function processRecording(ctx: any, url: string, durationSec: number) {
     logger.info({ url, durationSec }, "Getting live stream URL");
 
     const { stdout } = await execAsync(
-      `yt-dlp ${cookiesArgs.map(a => `"${a}"`).join(" ")} ` +
+      `"${YTDLP_BIN}" --js-runtimes "node:${NODE_BIN}" ${cookiesArgs.map(a => `"${a}"`).join(" ")} ` +
       `-f "best[height<=480]/best" --get-url "${url}"`,
       { timeout: 30000 }
     );
