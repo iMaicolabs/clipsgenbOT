@@ -48,6 +48,33 @@ Every package extends `tsconfig.base.json` which sets `composite: true`. The roo
 - `pnpm run build` — runs `typecheck` first, then recursively runs `build` in all packages that define it
 - `pnpm run typecheck` — runs `tsc --build --emitDeclarationOnly` using project references
 
+## Web App (artifacts/status)
+
+A full React + Tailwind web application at `/` that mirrors and extends the bot's features.
+
+### Features
+- **Clip creator** — paste YouTube URL, pick start/end time, choose quality (360p–1080p), click "Crear clip"
+- **Video preview** — fetches title/thumbnail/duration before clipping via `GET /api/video/info`
+- **Real-time progress** — SSE stream shows live progress bar while the clip processes
+- **Download** — one-click MP4 download from browser
+- **User accounts** — register/login (JWT via httpOnly cookie)
+- **My Clips** — saved clips with metadata, download links, expiry status, and delete
+- **Routing** — `/` (clipper), `/mis-clips` (saved clips), wouter-based SPA
+
+### API Routes (api-server)
+- `POST /api/auth/register` / `POST /api/auth/login` / `POST /api/auth/logout` / `GET /api/auth/me`
+- `GET /api/video/info?url=` — YouTube video metadata
+- `POST /api/web-clips` — create clip job (background)
+- `GET /api/web-clips/job/:jobId/events` — SSE progress stream
+- `GET /api/web-clips/job/:jobId/download` — download clip file
+- `GET /api/web-clips` — list user's saved clips (auth required)
+- `DELETE /api/web-clips/:id` — delete a saved clip
+- `GET /api/web-clips/db/:id/download` — download a saved clip
+
+### Auth
+- bcryptjs for password hashing, jsonwebtoken for JWTs, stored as httpOnly cookie `cgb_token`
+- JWT_SECRET env var (fallback to dev default)
+
 ## Telegram Bot
 
 A YouTube clip bot runs alongside the Express server. It uses:
