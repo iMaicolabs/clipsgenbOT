@@ -42,14 +42,34 @@ type Step =
   | "waiting_url"
   | "waiting_start"
   | "waiting_end"
+  | "waiting_quality"
   | "waiting_live_url"
   | "waiting_record_duration";
+
+type Quality = "1080" | "720" | "480" | "360";
+
+const QUALITY_LABELS: Record<Quality, string> = {
+  "1080": "🔵 1080p",
+  "720":  "🟢 720p",
+  "480":  "🟡 480p",
+  "360":  "🔴 360p",
+};
+
+function qualityFormat(q: Quality): string {
+  return (
+    `bestvideo[ext=mp4][height<=${q}]+bestaudio[ext=m4a]` +
+    `/bestvideo[height<=${q}]+bestaudio` +
+    `/best[height<=${q}]/best`
+  );
+}
 
 interface UserSession {
   step: Step;
   url?: string;
   startSec?: number;
   startStr?: string;
+  endSec?: number;
+  endStr?: string;
 }
 
 const sessions = new Map<number, UserSession>();
@@ -225,7 +245,8 @@ async function processClip(
   startSec: number,
   startStr: string,
   endSec: number,
-  endStr: string
+  endStr: string,
+  quality: Quality = "720"
 ) {
   const duration = endSec - startSec;
   const tmpDir = os.tmpdir();
@@ -235,9 +256,10 @@ async function processClip(
 
   const cookiesArgs = hasCookies() ? ["--cookies", COOKIES_PATH] : [];
   const jsArgs = ["--js-runtimes", `node:${NODE_BIN}`];
+  const fmt = qualityFormat(quality);
 
   const statusMsg = await ctx.reply(
-    `⏳ Procesando clip...\n⏱ ${startStr} → ${endStr} (${formatDuration(duration)})` +
+    `⏳ Procesando clip...\n⏱ ${startStr} → ${endStr} (${formatDuration(duration)})\n${QUALITY_LABELS[quality]}` +
     (hasCookies() ? "\n🍪 Usando cookies de YouTube" : "")
   );
   const chatId = ctx.chat.id;
@@ -266,7 +288,7 @@ async function processClip(
         ...jsArgs,
         ...clientArgs,
         ...cookiesArgs,
-        "-f", "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+        "-f", fmt,
         "--merge-output-format", "mp4",
         "--download-sections", `*${startSec}-${endSec}`,
         "--force-keyframes-at-cuts",
@@ -291,7 +313,7 @@ async function processClip(
           ...jsArgs,
           ...clientArgs,
           ...cookiesArgs,
-          "-f", "best[height<=720]/best",
+          "-f", fmt,
           "--merge-output-format", "mp4",
           "--download-sections", `*${startSec}-${endSec}`,
           "--newline",
@@ -325,7 +347,7 @@ async function processClip(
             ...jsArgs,
             ...clientArgs,
             ...cookiesArgs,
-            "-f", "best[height<=480]/best",
+            "-f", fmt,
             "--merge-output-format", "mp4",
             "--max-filesize", "400M",
             "--newline",
@@ -392,7 +414,7 @@ async function processClip(
 
     await ctx.replyWithVideo(
       { source: clipFile },
-      { caption: `🎬 Clip: ${startStr} → ${endStr}` }
+      { caption: `🎬 Clip: ${startStr} → ${endStr} · ${QUALITY_LABELS[quality]}` }
     );
 
     await ctx.telegram.deleteMessage(chatId, msgId).catch(() => {});
@@ -662,6 +684,35 @@ bot.on("document", async (ctx) => {
   }
 });
 
+const VALID_QUALITIES: Quality[] = ["1080", "720", "480", "360"];
+
+for (const q of VALID_QUALITIES) {
+  bot.action(`quality_${q}`, async (ctx) => {
+    await ctx.answerCbQuery();
+    const chatId = ctx.chat?.id ?? ctx.from?.id;
+    if (!chatId) return;
+
+    const session = getSession(chatId);
+    if (session.step !== "waiting_quality") {
+      return ctx.answerCbQuery("⚠️ Usa /clip para iniciar un nuevo clip.");
+    }
+
+    const { url, startSec, startStr, endSec, endStr } = session;
+    if (!url || startSec === undefined || !startStr || endSec === undefined || !endStr) {
+      resetSession(chatId);
+      return ctx.reply("❌ Se perdió el contexto. Usa /clip para empezar de nuevo.");
+    }
+
+    resetSession(chatId);
+
+    await ctx.editMessageText(
+      `✅ Calidad seleccionada: ${QUALITY_LABELS[q]}\n⏳ Iniciando descarga...`
+    ).catch(() => {});
+
+    await processClip(ctx, url, startSec, startStr, endSec, endStr, q);
+  });
+}
+
 bot.on("text", async (ctx) => {
   const chatId = ctx.chat.id;
   const session = getSession(chatId);
@@ -717,7 +768,6 @@ bot.on("text", async (ctx) => {
 
     const startSec = session.startSec!;
     const startStr = session.startStr!;
-    const url = session.url!;
 
     if (endSec <= startSec) {
       return ctx.reply(
@@ -733,8 +783,28 @@ bot.on("text", async (ctx) => {
       );
     }
 
-    resetSession(chatId);
-    await processClip(ctx, url, startSec, startStr, endSec, text);
+    session.endSec = endSec;
+    session.endStr = text;
+    session.step = "waiting_quality";
+
+    return ctx.reply(
+      `🎚 Elige la calidad de video:\n\n_Clip: \`${startStr}\` → \`${text}\` (${formatDuration(duration)})_\n\n⚠️ Mayor calidad = archivo más grande y más tiempo de descarga.`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "🔵 1080p (Full HD)", callback_data: "quality_1080" },
+              { text: "🟢 720p (HD)", callback_data: "quality_720" },
+            ],
+            [
+              { text: "🟡 480p (SD)", callback_data: "quality_480" },
+              { text: "🔴 360p (Ligero)", callback_data: "quality_360" },
+            ],
+          ],
+        },
+      }
+    );
   }
 
   if (session.step === "waiting_live_url") {
