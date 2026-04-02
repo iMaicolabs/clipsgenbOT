@@ -430,9 +430,9 @@ async function processClip(
     logger.info({ rawFile, clipFile, duration, hasAudio }, "Trimming video");
 
     if (hasAudio) {
-      // Stream copy — preserves original quality, keeps all streams including audio
+      // Re-encode with explicit stream mapping — ensures no black frames at start and audio is always included
       await execAsync(
-        `ffmpeg -y -i "${rawFile}" -ss 0 -t ${duration} -map 0 -c copy -movflags +faststart "${clipFile}"`,
+        `ffmpeg -y -i "${rawFile}" -ss 0 -t ${duration} -map 0:v:0 -map 0:a:0 -c:v libx264 -c:a aac -preset fast -movflags +faststart "${clipFile}"`,
         { timeout: 60000 }
       );
     } else {
@@ -444,14 +444,14 @@ async function processClip(
       const gotAudio = await tryYtdlpDownload(audioArgs, audioFile, () => {}, 60000, duration);
       if (gotAudio) {
         await execAsync(
-          `ffmpeg -y -i "${rawFile}" -i "${audioFile}" -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -shortest -movflags +faststart "${clipFile}"`,
+          `ffmpeg -y -i "${rawFile}" -i "${audioFile}" -ss 0 -t ${duration} -map 0:v:0 -map 1:a:0 -c:v libx264 -c:a aac -preset fast -shortest -movflags +faststart "${clipFile}"`,
           { timeout: 60000 }
         );
         await cleanupFiles([audioFile]);
       } else {
-        // Last resort: encode with silent audio placeholder
+        // Last resort: video only
         await execAsync(
-          `ffmpeg -y -i "${rawFile}" -ss 0 -t ${duration} -map 0:v:0 -c:v copy -an -movflags +faststart "${clipFile}"`,
+          `ffmpeg -y -i "${rawFile}" -ss 0 -t ${duration} -map 0:v:0 -c:v libx264 -preset fast -an -movflags +faststart "${clipFile}"`,
           { timeout: 60000 }
         );
       }
