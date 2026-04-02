@@ -149,14 +149,40 @@ function parseYtdlpProgress(line: string): ProgressInfo | null {
   };
 }
 
+function parseFfmpegProgress(chunk: string, totalSec: number): ProgressInfo | null {
+  const timeMatch = chunk.match(/time=(\d+):(\d+):(\d+\.?\d*)/);
+  if (!timeMatch || totalSec <= 0) return null;
+
+  const currentSec =
+    parseInt(timeMatch[1]) * 3600 +
+    parseInt(timeMatch[2]) * 60 +
+    parseFloat(timeMatch[3]);
+
+  const percent = Math.min(98, (currentSec / totalSec) * 100);
+
+  const sizeMatch = chunk.match(/size=\s*([\d.]+\s*\S+B)/);
+  const speedMatch = chunk.match(/speed=\s*([\d.]+x)/);
+  const fpsMatch = chunk.match(/fps=\s*([\d.]+)/);
+
+  const size = sizeMatch ? sizeMatch[1].replace(/\s+/, "") : "–";
+  const speed = speedMatch ? speedMatch[1] : fpsMatch ? `${parseFloat(fpsMatch[1]).toFixed(0)}fps` : "–";
+  const remaining = Math.max(0, totalSec - currentSec);
+  const eta = remaining > 0
+    ? `${Math.floor(remaining / 60)}:${Math.round(remaining % 60).toString().padStart(2, "0")}`
+    : "0:00";
+
+  return { percent, size, speed, eta };
+}
+
 function spawnYtdlp(
   args: string[],
   onProgress: (info: ProgressInfo) => void,
-  timeoutMs = 180000
+  timeoutMs = 180000,
+  totalDurationSec = 0
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const proc = spawn(YTDLP_BIN, args, { shell: false });
-    let stderr = "";
+    let stderrBuf = "";
     let timedOut = false;
 
     const timer = setTimeout(() => {
@@ -174,7 +200,15 @@ function spawnYtdlp(
     });
 
     proc.stderr.on("data", (data: Buffer) => {
-      stderr += data.toString();
+      const text = data.toString();
+      stderrBuf += text;
+      if (totalDurationSec > 0) {
+        const chunks = text.split(/[\r\n]+/);
+        for (const chunk of chunks) {
+          const info = parseFfmpegProgress(chunk, totalDurationSec);
+          if (info) onProgress(info);
+        }
+      }
     });
 
     proc.on("close", (code) => {
@@ -184,7 +218,7 @@ function spawnYtdlp(
         resolve();
       } else {
         const err: any = new Error(`yt-dlp exited with code ${code}`);
-        err.stderr = stderr;
+        err.stderr = stderrBuf;
         reject(err);
       }
     });
@@ -200,10 +234,11 @@ async function tryYtdlpDownload(
   args: string[],
   outputFile: string,
   onProgress: (info: ProgressInfo) => void,
-  timeoutMs = 180000
+  timeoutMs = 180000,
+  totalDurationSec = 0
 ): Promise<boolean> {
   try {
-    await spawnYtdlp(args, onProgress, timeoutMs);
+    await spawnYtdlp(args, onProgress, timeoutMs, totalDurationSec);
     return fs.existsSync(outputFile) && fs.statSync(outputFile).size > 0;
   } catch {
     await cleanupFiles([outputFile]);
@@ -222,7 +257,7 @@ async function updateProgress(
 ) {
   const now = Date.now();
   const pctDiff = Math.abs(info.percent - lastUpdateRef.pct);
-  if (pctDiff < 10 && now - lastUpdateRef.time < 5000) return;
+  if (pctDiff < 5 && now - lastUpdateRef.time < 2000) return;
 
   lastUpdateRef.pct = info.percent;
   lastUpdateRef.time = now;
@@ -265,9 +300,9 @@ async function processClip(
   const chatId = ctx.chat.id;
   const msgId = statusMsg.message_id;
 
-  const lastUpdate = { pct: -20, time: 0 };
+  const lastUpdate = { pct: -1, time: 0 };
 
-  const makeProgressHandler = () => (info: ProgressInfo) => {
+  const progressHandler = (info: ProgressInfo) => {
     updateProgress(ctx, chatId, msgId, info, startStr, endStr, lastUpdate).catch(() => {});
   };
 
@@ -296,12 +331,13 @@ async function processClip(
         "-o", rawFile,
         url,
       ];
-      const ok = await tryYtdlpDownload(args, rawFile, makeProgressHandler(), 120000);
+      const ok = await tryYtdlpDownload(args, rawFile, progressHandler, 120000, duration);
       if (ok) {
         downloaded = true;
         logger.info({ client, method: "sections" }, "Download succeeded");
         break;
       }
+      lastUpdate.pct = -1; lastUpdate.time = 0;
       logger.warn({ client, method: "sections" }, "failed, trying next");
     }
 
@@ -320,7 +356,7 @@ async function processClip(
           "-o", rawFile,
           url,
         ];
-        const ok = await tryYtdlpDownload(args, rawFile, makeProgressHandler(), 120000);
+        const ok = await tryYtdlpDownload(args, rawFile, progressHandler, 120000, duration);
         if (ok) {
           downloaded = true;
           logger.info({ client, method: "sections-nofkac" }, "Download succeeded");
@@ -336,7 +372,7 @@ async function processClip(
       await ctx.telegram.editMessageText(chatId, msgId, undefined,
         `⬇️ Descargando stream...\n░░░░░░░░░░ 0%\n⏱ ${startStr} → ${endStr}\n_(Stream live — esto puede tardar más)_`
       );
-      lastUpdate.pct = -20;
+      lastUpdate.pct = -1;
       lastUpdate.time = 0;
 
       const fullFile = path.join(tmpDir, `yt_full_${timestamp}.mp4`);
@@ -354,7 +390,7 @@ async function processClip(
             "-o", fullFile,
             url,
           ];
-          const ok = await tryYtdlpDownload(args, fullFile, makeProgressHandler(), 300000);
+          const ok = await tryYtdlpDownload(args, fullFile, progressHandler, 300000, duration);
           if (ok) {
             downloaded = true;
             logger.info({ client, method: "full-download" }, "Full download succeeded");
