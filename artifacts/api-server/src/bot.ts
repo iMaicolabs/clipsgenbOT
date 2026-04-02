@@ -688,14 +688,15 @@ const VALID_QUALITIES: Quality[] = ["1080", "720", "480", "360"];
 
 for (const q of VALID_QUALITIES) {
   bot.action(`quality_${q}`, async (ctx) => {
-    await ctx.answerCbQuery();
     const chatId = ctx.chat?.id ?? ctx.from?.id;
-    if (!chatId) return;
+    if (!chatId) { await ctx.answerCbQuery(); return; }
 
     const session = getSession(chatId);
     if (session.step !== "waiting_quality") {
-      return ctx.answerCbQuery("⚠️ Usa /clip para iniciar un nuevo clip.");
+      await ctx.answerCbQuery("⚠️ Usa /clip para iniciar un nuevo clip.");
+      return;
     }
+    await ctx.answerCbQuery();
 
     const { url, startSec, startStr, endSec, endStr } = session;
     if (!url || startSec === undefined || !startStr || endSec === undefined || !endStr) {
