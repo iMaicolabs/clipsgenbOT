@@ -35,5 +35,4 @@ app.listen(port, (err) => {
 
 startBot().catch((err) => {
   logger.error({ err }, "Telegram bot failed to start");
-  process.exit(1);
 });

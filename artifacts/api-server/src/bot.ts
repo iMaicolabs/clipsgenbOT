@@ -1142,14 +1142,18 @@ export async function startBot() {
     ctx.reply(`❌ <b>Error inesperado</b>\n\nAlgo salió mal. Usa /clip para intentar de nuevo.`, H).catch(() => {});
   });
 
-  await bot.telegram.setMyCommands([
-    { command: "clip", description: "✂️ Recortar un fragmento de video" },
-    { command: "grabar", description: "🔴 Grabar un directo activo" },
-    { command: "cookies", description: "🍪 Configurar cookies de YouTube" },
-    { command: "cancelar", description: "❌ Cancelar la operación actual" },
-    { command: "miid", description: "🪪 Ver mi ID de Telegram" },
-    { command: "start", description: "🎬 Bienvenida y ayuda" },
-  ]);
+  try {
+    await bot.telegram.setMyCommands([
+      { command: "clip", description: "✂️ Recortar un fragmento de video" },
+      { command: "grabar", description: "🔴 Grabar un directo activo" },
+      { command: "cookies", description: "🍪 Configurar cookies de YouTube" },
+      { command: "cancelar", description: "❌ Cancelar la operación actual" },
+      { command: "miid", description: "🪪 Ver mi ID de Telegram" },
+      { command: "start", description: "🎬 Bienvenida y ayuda" },
+    ]);
+  } catch (err) {
+    logger.warn({ err }, "Failed to set bot commands (non-fatal, will retry on next restart)");
+  }
 
   // Detect webhook domain from multiple platforms:
   // - WEBHOOK_DOMAIN: manual override (any platform)
