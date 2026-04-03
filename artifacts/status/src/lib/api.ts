@@ -36,6 +36,8 @@ export interface VideoInfo {
   thumbnail: string;
   duration: number;
   uploader: string;
+  isLive: boolean;
+  wasLive: boolean;
 }
 
 export interface ClipJob {

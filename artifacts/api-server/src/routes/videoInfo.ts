@@ -55,8 +55,13 @@ router.get("/video/info", async (req, res) => {
     const oembed = await oembedRes.value.json() as OEmbedResponse;
 
     let duration = 0;
+    let isLive = false;
+    let wasLive = false;
+
     if (pageRes.status === "fulfilled" && pageRes.value.ok) {
       const html = await pageRes.value.text();
+
+      // Duration
       const durationMatch = html.match(/"approxDurationMs":"(\d+)"/);
       if (durationMatch) {
         duration = Math.round(parseInt(durationMatch[1]) / 1000);
@@ -64,6 +69,18 @@ router.get("/video/info", async (req, res) => {
         const isoMatch = html.match(/itemprop="duration"\s+content="([^"]+)"/);
         if (isoMatch) duration = parseIso8601Duration(isoMatch[1]);
       }
+
+      // Live detection
+      isLive = /"isLive"\s*:\s*true/.test(html);
+      wasLive = /"isLiveContent"\s*:\s*true/.test(html);
+    }
+
+    // Also detect from URL path pattern /live/
+    if (!isLive && !wasLive) {
+      try {
+        const u = new URL(url);
+        if (u.pathname.startsWith("/live/")) wasLive = true;
+      } catch {}
     }
 
     res.json({
@@ -71,6 +88,8 @@ router.get("/video/info", async (req, res) => {
       thumbnail: oembed.thumbnail_url.replace("hqdefault", "maxresdefault"),
       duration,
       uploader: oembed.author_name,
+      isLive,
+      wasLive,
     });
   } catch (err: any) {
     res.status(422).json({ error: "No se pudo obtener información del video", details: err.message });

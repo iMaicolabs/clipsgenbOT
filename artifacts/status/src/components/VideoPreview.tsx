@@ -1,4 +1,4 @@
-import { Clock, User2, ExternalLink, CheckCircle2 } from "lucide-react";
+import { Clock, User2, ExternalLink, CheckCircle2, Radio, Video } from "lucide-react";
 import { formatDuration, type VideoInfo } from "@/lib/api";
 
 interface Props {
@@ -7,20 +7,41 @@ interface Props {
 }
 
 export default function VideoPreview({ info, url }: Props) {
+  const isLiveNow = info.isLive;
+  const isLiveRecording = !info.isLive && info.wasLive;
+  const isVod = !info.isLive && !info.wasLive;
+
   return (
     <div className="flex gap-3 p-3 rounded-xl border border-green-500/15 mt-1" style={{ background: "rgba(34,197,94,0.05)" }}>
-      {info.thumbnail ? (
-        <img
-          src={info.thumbnail}
-          alt={info.title}
-          className="w-20 h-12 object-cover rounded-lg shrink-0 bg-slate-800"
-          onError={e => {
-            (e.target as HTMLImageElement).src = info.thumbnail.replace("maxresdefault", "hqdefault");
-          }}
-        />
-      ) : (
-        <div className="w-20 h-12 rounded-lg shrink-0 bg-white/5" />
-      )}
+      <div className="relative shrink-0">
+        {info.thumbnail ? (
+          <img
+            src={info.thumbnail}
+            alt={info.title}
+            className="w-20 h-12 object-cover rounded-lg bg-slate-800"
+            onError={e => {
+              (e.target as HTMLImageElement).src = info.thumbnail.replace("maxresdefault", "hqdefault");
+            }}
+          />
+        ) : (
+          <div className="w-20 h-12 rounded-lg bg-white/5" />
+        )}
+        {isLiveNow && (
+          <span className="absolute top-1 left-1 flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] font-bold bg-red-600 text-white leading-none">
+            <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />EN VIVO
+          </span>
+        )}
+        {isLiveRecording && (
+          <span className="absolute top-1 left-1 flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] font-bold bg-purple-700 text-white leading-none">
+            <Radio className="w-2 h-2" />LIVE
+          </span>
+        )}
+        {isVod && (
+          <span className="absolute top-1 left-1 flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] font-bold bg-black/60 text-slate-300 leading-none">
+            <Video className="w-2 h-2" />VIDEO
+          </span>
+        )}
+      </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-start gap-1">
           <CheckCircle2 className="w-3.5 h-3.5 text-green-400 shrink-0 mt-0.5" />
