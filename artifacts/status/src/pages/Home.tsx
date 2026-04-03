@@ -116,6 +116,8 @@ export default function Home() {
         url: url.trim(), startSec, endSec,
         startStr: startStr.trim(), endStr: endStr.trim(),
         quality, save: saveToAccount && !!user,
+        videoTitle: videoInfo?.title,
+        videoThumbnail: videoInfo?.thumbnail,
       });
       setClipResults(prev => [
         { jobId: result.jobId, dbClipId: result.dbClipId, startStr: startStr.trim(), endStr: endStr.trim(), quality },

@@ -106,7 +106,7 @@ export default function ProgressPanel({ jobId, startStr, endStr, quality }: Prop
             </div>
             <p className="text-[11px] text-slate-600 flex items-center gap-1">
               <Clock className="w-3 h-3" />
-              Los clips pueden tardar 1–3 minutos dependiendo de la duración
+              Normalmente listo en 10–20 segundos
             </p>
           </div>
         )}

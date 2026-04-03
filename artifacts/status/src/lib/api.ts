@@ -82,6 +82,8 @@ export function createClip(params: {
   endStr: string;
   quality: string;
   save: boolean;
+  videoTitle?: string;
+  videoThumbnail?: string;
 }) {
   return api.post<{ jobId: string; dbClipId?: number }>("/web-clips", params);
 }

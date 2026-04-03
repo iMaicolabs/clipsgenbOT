@@ -10,7 +10,6 @@ import {
   jobEmitter,
   processClipJob,
   CLIPS_DIR,
-  getVideoInfo,
   type ClipJob,
 } from "../lib/clipProcessor";
 import { requireAuth, optionalAuth, type AuthRequest } from "../lib/auth";
@@ -26,6 +25,8 @@ const createClipSchema = z.object({
   endStr: z.string(),
   quality: z.enum(["360", "480", "720", "1080"]).default("720"),
   save: z.boolean().default(false),
+  videoTitle: z.string().optional(),
+  videoThumbnail: z.string().optional(),
 });
 
 router.post("/web-clips", optionalAuth as any, async (req: AuthRequest, res) => {
@@ -34,7 +35,7 @@ router.post("/web-clips", optionalAuth as any, async (req: AuthRequest, res) => 
     res.status(400).json({ error: "Parámetros inválidos", details: parsed.error.issues });
     return;
   }
-  const { url, startSec, endSec, startStr, endStr, quality, save } = parsed.data;
+  const { url, startSec, endSec, startStr, endStr, quality, save, videoTitle, videoThumbnail } = parsed.data;
 
   if (endSec <= startSec) {
     res.status(400).json({ error: "El tiempo de fin debe ser mayor que el de inicio" });
@@ -57,13 +58,12 @@ router.post("/web-clips", optionalAuth as any, async (req: AuthRequest, res) => 
   let dbClipId: number | undefined;
   if (req.userId && save) {
     try {
-      const info = await getVideoInfo(url).catch(() => null);
       const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
       const [clip] = await db.insert(clipsTable).values({
         userId: req.userId,
         youtubeUrl: url,
-        videoTitle: info?.title,
-        videoThumbnail: info?.thumbnail,
+        videoTitle: videoTitle ?? null,
+        videoThumbnail: videoThumbnail ?? null,
         startSec,
         endSec,
         startStr,
