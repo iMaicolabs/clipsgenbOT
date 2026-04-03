@@ -5,6 +5,7 @@ import path from "path";
 import os from "os";
 import { EventEmitter } from "events";
 import { logger } from "./logger";
+import { getPipedStreams } from "./pipedDownloader";
 
 const execAsync = promisify(exec);
 
@@ -129,7 +130,7 @@ function spawnYtdlp(
   });
 }
 
-const PLAYER_CLIENTS = ["default", "ios", "web", "mweb"];
+const PLAYER_CLIENTS = ["ios", "android_creator", "tv_embedded", "default", "web", "mweb"];
 
 export async function processClipJob(
   jobId: string,
@@ -203,34 +204,52 @@ export async function processClipJob(
     }
 
     if (!downloadedFile) {
-      logger.error({ jobId, errors }, "All yt-dlp clients failed");
-      const hint = errors.some(e => e.includes("Sign in") || e.includes("age"))
-        ? "El video requiere inicio de sesión o tiene restricción de edad."
-        : errors.some(e => e.includes("private") || e.includes("unavailable"))
-        ? "El video es privado o no está disponible."
-        : "No se pudo descargar el video. Verifica que el link sea válido y el video sea público.";
-      throw new Error(hint);
+      logger.warn({ jobId, errors }, "All yt-dlp clients failed — trying Piped fallback");
+      updateJob(job, { progress: 40, progressMsg: "Usando servidor alternativo..." });
+
+      try {
+        const qualityNum = parseInt(quality) || 720;
+        const piped = await getPipedStreams(url, qualityNum);
+        logger.info({ jobId, instance: "piped" }, "Piped streams obtained");
+
+        updateJob(job, { progress: 50, progressMsg: "Descargando con servidor alternativo..." });
+
+        // Use ffmpeg to download both streams simultaneously and cut to section
+        await execAsync(
+          `ffmpeg -y -ss ${startSec} -t ${duration} -i "${piped.videoUrl}" -ss ${startSec} -t ${duration} -i "${piped.audioUrl}" ` +
+          `-map 0:v:0 -map 1:a:0 -c:v libx264 -c:a aac -preset fast -movflags +faststart "${clipFile}"`,
+          { timeout: 180000 }
+        );
+        updateJob(job, { progress: 95, progressMsg: "Finalizando..." });
+      } catch (pipedErr: any) {
+        logger.error({ jobId, pipedErr, ytdlpErrors: errors }, "Piped fallback also failed");
+        const isPrivate = errors.some(e => /private|unavailable|not available/i.test(e));
+        const hint = isPrivate
+          ? "El video es privado o no está disponible en tu región."
+          : "No se pudo descargar el video. Es posible que YouTube esté bloqueando temporalmente las descargas desde este servidor. Intenta más tarde.";
+        throw new Error(hint);
+      }
+    } else {
+      updateJob(job, { progress: 78, progressMsg: "Recortando clip..." });
+
+      const probeOut = await execAsync(
+        `ffprobe -v quiet -print_format json -show_streams "${downloadedFile}"`,
+        { timeout: 10000 }
+      ).catch(() => ({ stdout: "{}" }));
+      const probeData = JSON.parse((probeOut as any).stdout || "{}");
+      const hasAudio = (probeData.streams || []).some((s: any) => s.codec_type === "audio");
+
+      const ffmpegAudioArgs = hasAudio
+        ? ["-map", "0:v:0", "-map", "0:a:0", "-c:v", "libx264", "-c:a", "aac", "-preset", "fast", "-movflags", "+faststart"]
+        : ["-map", "0:v:0", "-c:v", "libx264", "-preset", "fast", "-an", "-movflags", "+faststart"];
+
+      await execAsync(
+        `ffmpeg -y -i "${downloadedFile}" -ss 0 -t ${duration} ${ffmpegAudioArgs.join(" ")} "${clipFile}"`,
+        { timeout: 120000 }
+      );
+
+      cleanup(downloadedFile);
     }
-
-    updateJob(job, { progress: 78, progressMsg: "Recortando clip..." });
-
-    const probeOut = await execAsync(
-      `ffprobe -v quiet -print_format json -show_streams "${downloadedFile}"`,
-      { timeout: 10000 }
-    ).catch(() => ({ stdout: "{}" }));
-    const probeData = JSON.parse((probeOut as any).stdout || "{}");
-    const hasAudio = (probeData.streams || []).some((s: any) => s.codec_type === "audio");
-
-    const ffmpegAudioArgs = hasAudio
-      ? ["-map", "0:v:0", "-map", "0:a:0", "-c:v", "libx264", "-c:a", "aac", "-preset", "fast", "-movflags", "+faststart"]
-      : ["-map", "0:v:0", "-c:v", "libx264", "-preset", "fast", "-an", "-movflags", "+faststart"];
-
-    await execAsync(
-      `ffmpeg -y -i "${downloadedFile}" -ss 0 -t ${duration} ${ffmpegAudioArgs.join(" ")} "${clipFile}"`,
-      { timeout: 120000 }
-    );
-
-    cleanup(downloadedFile);
 
     if (!fs.existsSync(clipFile) || fs.statSync(clipFile).size === 0) {
       throw new Error("El recorte falló — el archivo de salida está vacío");
