@@ -227,7 +227,7 @@ export default function Home() {
                 max={videoInfo?.duration}
               />
             </div>
-            <p className="text-xs text-slate-600 mt-2">Formato: <span className="font-mono text-slate-500">segundos</span>, <span className="font-mono text-slate-500">min:seg</span> o <span className="font-mono text-slate-500">hh:mm:ss</span></p>
+            <p className="text-xs text-slate-600 mt-2">Escribe solo números — los dos puntos se añaden solos</p>
           </div>
 
           {/* Step 3 – Quality */}
@@ -354,6 +354,15 @@ export default function Home() {
   );
 }
 
+function autoFormatTime(digits: string): string {
+  const d = digits.replace(/\D/g, "").slice(0, 6);
+  if (d.length <= 2) return d;
+  if (d.length === 3) return `${d[0]}:${d.slice(1)}`;
+  if (d.length === 4) return `${d.slice(0, 2)}:${d.slice(2)}`;
+  if (d.length === 5) return `${d[0]}:${d.slice(1, 3)}:${d.slice(3)}`;
+  return `${d.slice(0, 2)}:${d.slice(2, 4)}:${d.slice(4)}`;
+}
+
 function TimeInput({ label, value, onChange, placeholder, max }: {
   label: string; value: string; onChange: (v: string) => void; placeholder: string; max?: number;
 }) {
@@ -375,8 +384,9 @@ function TimeInput({ label, value, onChange, placeholder, max }: {
         <Clock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-600 pointer-events-none" />
         <input
           type="text"
+          inputMode="numeric"
           value={value}
-          onChange={e => onChange(e.target.value)}
+          onChange={e => onChange(autoFormatTime(e.target.value))}
           placeholder={placeholder}
           className="w-full rounded-xl pl-8 pr-3 py-3 text-sm font-mono text-white placeholder:text-slate-700 focus:outline-none transition-all border"
           style={{ background: "rgba(255,255,255,0.04)", borderColor: value ? "rgba(229,62,62,0.3)" : "rgba(255,255,255,0.07)" }}
