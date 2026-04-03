@@ -18,12 +18,20 @@ interface ClipResult {
   quality: Quality;
 }
 
-const QUALITY_OPTIONS: { value: Quality; label: string; badge?: string; color: string }[] = [
-  { value: "360", label: "360p", color: "text-slate-400" },
-  { value: "480", label: "480p", color: "text-blue-400" },
-  { value: "720", label: "720p", badge: "HD", color: "text-green-400" },
-  { value: "1080", label: "1080p", badge: "Full HD", color: "text-purple-400" },
+// Typical total bitrates (video + audio) in kbps for each quality on YouTube
+const QUALITY_OPTIONS: { value: Quality; label: string; badge?: string; color: string; kbps: number }[] = [
+  { value: "360",  label: "360p",  color: "text-slate-400",  kbps: 500  },
+  { value: "480",  label: "480p",  color: "text-blue-400",   kbps: 1000 },
+  { value: "720",  label: "720p",  badge: "HD",      color: "text-green-400",  kbps: 2700 },
+  { value: "1080", label: "1080p", badge: "Full HD", color: "text-purple-400", kbps: 5200 },
 ];
+
+function estimateSize(kbps: number, durationSec: number): string {
+  const mb = (kbps * durationSec) / 8 / 1024;
+  if (mb < 1) return `~${Math.round(mb * 1024)} KB`;
+  if (mb < 10) return `~${mb.toFixed(1)} MB`;
+  return `~${Math.round(mb)} MB`;
+}
 
 function isYouTubeUrl(url: string): boolean {
   try {
@@ -237,27 +245,37 @@ export default function Home() {
               <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Calidad de video</span>
             </div>
             <div className="grid grid-cols-4 gap-2">
-              {QUALITY_OPTIONS.map(opt => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  onClick={() => setQuality(opt.value)}
-                  className={`relative py-3 px-2 rounded-xl border text-center transition-all ${
-                    quality === opt.value
-                      ? "border-red-500/50 shadow-lg shadow-red-900/20"
-                      : "border-white/5 hover:border-white/15"
-                  }`}
-                  style={quality === opt.value ? { background: "rgba(220,38,38,0.12)" } : { background: "rgba(255,255,255,0.03)" }}
-                >
-                  {quality === opt.value && (
-                    <div className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-red-500" />
-                  )}
-                  <div className={`text-sm font-bold ${quality === opt.value ? "text-white" : "text-slate-400"}`}>{opt.label}</div>
-                  {opt.badge && (
-                    <div className={`text-[10px] font-medium mt-0.5 ${quality === opt.value ? opt.color : "text-slate-600"}`}>{opt.badge}</div>
-                  )}
-                </button>
-              ))}
+              {(() => {
+                let clipDuration: number | null = null;
+                try {
+                  const s = parseTime(startStr), e = parseTime(endStr);
+                  if (e > s) clipDuration = e - s;
+                } catch {}
+                return QUALITY_OPTIONS.map(opt => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setQuality(opt.value)}
+                    className={`relative py-3 px-2 rounded-xl border text-center transition-all ${
+                      quality === opt.value
+                        ? "border-red-500/50 shadow-lg shadow-red-900/20"
+                        : "border-white/5 hover:border-white/15"
+                    }`}
+                    style={quality === opt.value ? { background: "rgba(220,38,38,0.12)" } : { background: "rgba(255,255,255,0.03)" }}
+                  >
+                    {quality === opt.value && (
+                      <div className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-red-500" />
+                    )}
+                    <div className={`text-sm font-bold ${quality === opt.value ? "text-white" : "text-slate-400"}`}>{opt.label}</div>
+                    {opt.badge && (
+                      <div className={`text-[10px] font-medium ${quality === opt.value ? opt.color : "text-slate-600"}`}>{opt.badge}</div>
+                    )}
+                    <div className={`text-[10px] mt-0.5 tabular-nums ${quality === opt.value ? "text-slate-400" : "text-slate-600"}`}>
+                      {clipDuration ? estimateSize(opt.kbps, clipDuration) : "—"}
+                    </div>
+                  </button>
+                ));
+              })()}
             </div>
           </div>
 
