@@ -159,6 +159,15 @@ async function raceYtdlpClients(
   const errors: string[] = [];
   const handles: Array<{ client: string; kill: () => void; outArg: string }> = [];
 
+  // Only report the highest progress seen across all parallel clients (no chaotic jumps)
+  let bestPct = 0;
+  const throttledProgress = (pct: number) => {
+    if (pct > bestPct) {
+      bestPct = pct;
+      onProgress(pct);
+    }
+  };
+
   const clientPromises = PLAYER_CLIENTS.map(async (client) => {
     const clientArgs = client === "default"
       ? []
@@ -180,7 +189,7 @@ async function raceYtdlpClients(
       url,
     ];
 
-    const handle = spawnYtdlp(args, onProgress, 60000);
+    const handle = spawnYtdlp(args, throttledProgress, 60000);
     handles.push({ client, kill: handle.kill, outArg });
 
     const dest = await handle.promise;
