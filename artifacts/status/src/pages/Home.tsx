@@ -1,5 +1,8 @@
-import { useState, useRef, useCallback } from "react";
-import { Link2, Scissors, Play, AlertCircle, BookmarkPlus, Loader2, Clock, ChevronDown } from "lucide-react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import {
+  Link2, Scissors, AlertCircle, BookmarkPlus,
+  Loader2, Clock, X, ArrowRight, Zap, Download, Shield
+} from "lucide-react";
 import { getVideoInfo, createClip, parseTime, formatDuration, type VideoInfo } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import VideoPreview from "@/components/VideoPreview";
@@ -15,12 +18,19 @@ interface ClipResult {
   quality: Quality;
 }
 
-const QUALITY_OPTIONS: { value: Quality; label: string; desc: string }[] = [
-  { value: "360", label: "360p", desc: "Compacto" },
-  { value: "480", label: "480p", desc: "SD" },
-  { value: "720", label: "720p HD", desc: "Recomendado" },
-  { value: "1080", label: "1080p", desc: "Full HD" },
+const QUALITY_OPTIONS: { value: Quality; label: string; badge?: string; color: string }[] = [
+  { value: "360", label: "360p", color: "text-slate-400" },
+  { value: "480", label: "480p", color: "text-blue-400" },
+  { value: "720", label: "720p", badge: "HD", color: "text-green-400" },
+  { value: "1080", label: "1080p", badge: "Full HD", color: "text-purple-400" },
 ];
+
+function isYouTubeUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return ["youtube.com", "www.youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com"].includes(u.hostname);
+  } catch { return false; }
+}
 
 export default function Home() {
   const { user } = useAuth();
@@ -39,68 +49,67 @@ export default function Home() {
   const [clipLoading, setClipLoading] = useState(false);
   const [clipError, setClipError] = useState("");
 
-  const infoAbortRef = useRef<AbortController | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const fetchInfo = useCallback(async (u: string) => {
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setInfoLoading(true);
+    setInfoError("");
+    try {
+      const info = await getVideoInfo(u, ctrl.signal);
+      setVideoInfo(info);
+    } catch (e: any) {
+      if (e.name !== "AbortError") {
+        setInfoError("No se pudo obtener el video. Verifica que el link sea válido y público.");
+        setVideoInfo(null);
+      }
+    } finally {
+      setInfoLoading(false);
+    }
+  }, []);
 
   const handleUrlChange = (v: string) => {
     setUrl(v);
     setVideoInfo(null);
     setInfoError("");
-    infoAbortRef.current?.abort();
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (isYouTubeUrl(v.trim())) {
+      debounceRef.current = setTimeout(() => fetchInfo(v.trim()), 700);
+    }
   };
 
-  const fetchVideoInfo = useCallback(async () => {
-    if (!url.trim()) return;
-    infoAbortRef.current?.abort();
-    const ctrl = new AbortController();
-    infoAbortRef.current = ctrl;
-    setInfoLoading(true);
+  const clearUrl = () => {
+    setUrl("");
+    setVideoInfo(null);
     setInfoError("");
-    try {
-      const info = await getVideoInfo(url.trim(), ctrl.signal);
-      setVideoInfo(info);
-    } catch (e: any) {
-      if (e.name !== "AbortError") {
-        setInfoError(e.message ?? "No se pudo obtener información del video");
-      }
-    } finally {
-      setInfoLoading(false);
-    }
-  }, [url]);
+    abortRef.current?.abort();
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+  };
 
-  const handleCreateClip = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setClipError("");
-
     let startSec: number, endSec: number;
     try {
       startSec = parseTime(startStr.trim());
       endSec = parseTime(endStr.trim());
     } catch (err: any) {
-      setClipError(err.message);
-      return;
+      setClipError(err.message); return;
     }
-
-    if (endSec <= startSec) {
-      setClipError("El tiempo de fin debe ser mayor que el de inicio");
-      return;
-    }
-    if (endSec - startSec > 600) {
-      setClipError("El clip no puede durar más de 10 minutos");
-      return;
-    }
+    if (endSec <= startSec) { setClipError("El tiempo de fin debe ser mayor que el de inicio"); return; }
+    if (endSec - startSec > 600) { setClipError("El clip no puede durar más de 10 minutos"); return; }
 
     setClipLoading(true);
     try {
       const result = await createClip({
-        url: url.trim(),
-        startSec,
-        endSec,
-        startStr: startStr.trim(),
-        endStr: endStr.trim(),
-        quality,
-        save: saveToAccount && !!user,
+        url: url.trim(), startSec, endSec,
+        startStr: startStr.trim(), endStr: endStr.trim(),
+        quality, save: saveToAccount && !!user,
       });
-      setClipResults((prev) => [
+      setClipResults(prev => [
         { jobId: result.jobId, dbClipId: result.dbClipId, startStr: startStr.trim(), endStr: endStr.trim(), quality },
         ...prev,
       ]);
@@ -111,158 +120,209 @@ export default function Home() {
     }
   };
 
+  const duration = (() => {
+    try {
+      const s = parseTime(startStr), e = parseTime(endStr);
+      if (e > s) return formatDuration(e - s);
+    } catch {}
+    return null;
+  })();
+
+  const canSubmit = !!url.trim() && !!startStr.trim() && !!endStr.trim() && !clipLoading;
+
   return (
-    <div className="min-h-screen bg-[#0d1117] pt-20 pb-16">
-      <div className="max-w-2xl mx-auto px-4">
+    <div className="min-h-screen pt-14" style={{ background: "radial-gradient(ellipse 80% 60% at 50% -10%, rgba(220,38,38,0.12) 0%, transparent 70%), #09090f" }}>
 
-        <div className="text-center mb-10">
-          <h1 className="text-4xl font-bold text-white tracking-tight">
-            Recorta cualquier video de YouTube
-          </h1>
-          <p className="text-slate-400 mt-3 text-lg">
-            Pega el link, elige el fragmento y descárgalo en segundos.
-          </p>
+      {/* Hero */}
+      <div className="text-center pt-14 pb-10 px-4">
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-red-500/20 bg-red-500/5 text-xs text-red-400 font-medium mb-5">
+          <Zap className="w-3 h-3" /> Rápido · Gratis · Sin marcas de agua
         </div>
+        <h1 className="text-4xl sm:text-5xl font-extrabold text-white tracking-tight leading-tight mb-3">
+          Recorta cualquier video<br />
+          <span style={{ background: "linear-gradient(135deg,#f87171,#dc2626)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+            de YouTube en segundos
+          </span>
+        </h1>
+        <p className="text-slate-400 text-lg max-w-md mx-auto">
+          Pega el link, elige el fragmento y descarga el clip directo a tu dispositivo.
+        </p>
+      </div>
 
-        <div className="bg-[#161b22] border border-white/10 rounded-2xl p-6 shadow-xl shadow-black/30 space-y-5">
+      <div className="max-w-xl mx-auto px-4 pb-20">
 
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-slate-400 uppercase tracking-wider">URL de YouTube</label>
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <Link2 className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                <input
-                  type="url"
-                  value={url}
-                  onChange={(e) => handleUrlChange(e.target.value)}
-                  placeholder="https://youtube.com/watch?v=..."
-                  className="w-full bg-[#0d1117] border border-white/10 rounded-xl pl-10 pr-4 py-3 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-red-600 transition-colors"
-                />
-              </div>
-              <button
-                type="button"
-                onClick={fetchVideoInfo}
-                disabled={!url.trim() || infoLoading}
-                className="px-4 py-3 bg-white/5 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 rounded-xl text-sm font-medium text-slate-300 hover:text-white transition-all flex items-center gap-2"
-              >
-                {infoLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                {infoLoading ? "" : "Ver"}
-              </button>
+        {/* Main card */}
+        <div className="rounded-2xl border border-white/8 overflow-hidden shadow-2xl" style={{ background: "rgba(18,18,28,0.9)" }}>
+
+          {/* Step 1 – URL */}
+          <div className="p-5 border-b border-white/5">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="w-5 h-5 rounded-full bg-red-600 text-white text-xs font-bold flex items-center justify-center shrink-0">1</span>
+              <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Pega el link de YouTube</span>
             </div>
-            {infoError && (
-              <p className="flex items-center gap-1.5 text-xs text-red-400 mt-1">
-                <AlertCircle className="w-3.5 h-3.5" />{infoError}
-              </p>
-            )}
+            <div className="relative">
+              <Link2 className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none" />
+              <input
+                type="url"
+                value={url}
+                onChange={e => handleUrlChange(e.target.value)}
+                onPaste={e => {
+                  const v = e.clipboardData.getData("text");
+                  if (isYouTubeUrl(v.trim())) {
+                    setTimeout(() => fetchInfo(v.trim()), 0);
+                  }
+                }}
+                placeholder="https://youtube.com/watch?v=..."
+                className="w-full rounded-xl pl-10 pr-10 py-3.5 text-sm text-white placeholder:text-slate-600 focus:outline-none transition-all border"
+                style={{ background: "rgba(255,255,255,0.04)", borderColor: url ? "rgba(229,62,62,0.35)" : "rgba(255,255,255,0.07)" }}
+              />
+              {url && (
+                <button onClick={clearUrl} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors">
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+
+            {/* Info loading / error / preview */}
+            <div className="mt-2.5">
+              {infoLoading && (
+                <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-red-400" />
+                  Obteniendo información del video...
+                </div>
+              )}
+              {infoError && !infoLoading && (
+                <div className="flex items-center gap-1.5 text-xs text-red-400">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />{infoError}
+                </div>
+              )}
+              {videoInfo && !infoLoading && <VideoPreview info={videoInfo} url={url} />}
+            </div>
           </div>
 
-          {videoInfo && <VideoPreview info={videoInfo} url={url} />}
-
-          <form onSubmit={handleCreateClip} className="space-y-5">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                  <Clock className="w-3 h-3" /> Inicio
-                </label>
-                <input
-                  type="text"
-                  value={startStr}
-                  onChange={(e) => setStartStr(e.target.value)}
-                  placeholder="0:00 o 1:30:00"
-                  required
-                  className="w-full bg-[#0d1117] border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-red-600 transition-colors font-mono"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                  <Clock className="w-3 h-3" /> Fin
-                </label>
-                <input
-                  type="text"
-                  value={endStr}
-                  onChange={(e) => setEndStr(e.target.value)}
-                  placeholder="0:30 o 1:32:00"
-                  required
-                  className="w-full bg-[#0d1117] border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-red-600 transition-colors font-mono"
-                />
-              </div>
+          {/* Step 2 – Times */}
+          <div className="p-5 border-b border-white/5">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="w-5 h-5 rounded-full bg-red-600 text-white text-xs font-bold flex items-center justify-center shrink-0">2</span>
+              <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Elige el fragmento</span>
+              {duration && (
+                <span className="ml-auto text-xs text-slate-500 bg-white/5 px-2 py-0.5 rounded-full">
+                  ⏱ {duration}
+                </span>
+              )}
             </div>
-
-            {startStr && endStr && (() => {
-              try {
-                const s = parseTime(startStr), e = parseTime(endStr);
-                if (e > s) return (
-                  <p className="text-xs text-slate-500 -mt-2">
-                    Duración: <span className="text-slate-300 font-medium">{formatDuration(e - s)}</span>
-                  </p>
-                );
-              } catch {}
-              return null;
-            })()}
-
-            <div className="space-y-2">
-              <label className="text-xs font-medium text-slate-400 uppercase tracking-wider">Calidad</label>
-              <div className="grid grid-cols-4 gap-2">
-                {QUALITY_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    onClick={() => setQuality(opt.value)}
-                    className={`py-2 px-2 rounded-xl border text-center transition-all ${
-                      quality === opt.value
-                        ? "bg-red-600/20 border-red-500 text-red-300"
-                        : "bg-[#0d1117] border-white/10 text-slate-400 hover:border-white/20 hover:text-white"
-                    }`}
-                  >
-                    <div className="text-sm font-semibold">{opt.label}</div>
-                    <div className="text-xs opacity-60">{opt.desc}</div>
-                  </button>
-                ))}
-              </div>
+            <div className="grid grid-cols-2 gap-2.5">
+              <TimeInput
+                label="Inicio"
+                value={startStr}
+                onChange={setStartStr}
+                placeholder="0:00"
+                max={videoInfo?.duration}
+              />
+              <TimeInput
+                label="Fin"
+                value={endStr}
+                onChange={setEndStr}
+                placeholder="0:30"
+                max={videoInfo?.duration}
+              />
             </div>
+            <p className="text-xs text-slate-600 mt-2">Formato: <span className="font-mono text-slate-500">segundos</span>, <span className="font-mono text-slate-500">min:seg</span> o <span className="font-mono text-slate-500">hh:mm:ss</span></p>
+          </div>
 
-            {user && (
-              <label className="flex items-center gap-3 p-3 bg-[#0d1117] border border-white/10 rounded-xl cursor-pointer group hover:border-white/20 transition-colors">
-                <div
-                  className={`w-5 h-5 rounded flex items-center justify-center transition-colors ${
-                    saveToAccount ? "bg-red-600" : "bg-white/5 border border-white/20"
+          {/* Step 3 – Quality */}
+          <div className="p-5 border-b border-white/5">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="w-5 h-5 rounded-full bg-red-600 text-white text-xs font-bold flex items-center justify-center shrink-0">3</span>
+              <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Calidad de video</span>
+            </div>
+            <div className="grid grid-cols-4 gap-2">
+              {QUALITY_OPTIONS.map(opt => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setQuality(opt.value)}
+                  className={`relative py-3 px-2 rounded-xl border text-center transition-all ${
+                    quality === opt.value
+                      ? "border-red-500/50 shadow-lg shadow-red-900/20"
+                      : "border-white/5 hover:border-white/15"
                   }`}
-                  onClick={() => setSaveToAccount((v) => !v)}
+                  style={quality === opt.value ? { background: "rgba(220,38,38,0.12)" } : { background: "rgba(255,255,255,0.03)" }}
                 >
-                  {saveToAccount && <svg className="w-3 h-3 text-white" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                  {quality === opt.value && (
+                    <div className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-red-500" />
+                  )}
+                  <div className={`text-sm font-bold ${quality === opt.value ? "text-white" : "text-slate-400"}`}>{opt.label}</div>
+                  {opt.badge && (
+                    <div className={`text-[10px] font-medium mt-0.5 ${quality === opt.value ? opt.color : "text-slate-600"}`}>{opt.badge}</div>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Save option + submit */}
+          <div className="p-5 space-y-3">
+            {user && (
+              <button
+                type="button"
+                onClick={() => setSaveToAccount(v => !v)}
+                className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left ${
+                  saveToAccount ? "border-red-500/30 bg-red-500/8" : "border-white/5 bg-white/2 hover:border-white/10"
+                }`}
+              >
+                <div className={`w-5 h-5 rounded-md flex items-center justify-center shrink-0 transition-all ${saveToAccount ? "bg-red-600" : "bg-white/10 border border-white/20"}`}>
+                  {saveToAccount && (
+                    <svg className="w-3 h-3 text-white" viewBox="0 0 12 12" fill="none">
+                      <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  )}
                 </div>
                 <div>
-                  <p className="text-sm text-slate-300 flex items-center gap-1.5">
+                  <p className="text-sm font-medium text-slate-300 flex items-center gap-1.5">
                     <BookmarkPlus className="w-3.5 h-3.5 text-red-400" />
-                    Guardar en mi cuenta
+                    Guardar en mis clips
                   </p>
-                  <p className="text-xs text-slate-500">El clip se guardará en "Mis clips" por 24 h</p>
+                  <p className="text-xs text-slate-600">Disponible 24 h en "Mis clips"</p>
                 </div>
-              </label>
+              </button>
             )}
 
             {clipError && (
-              <div className="flex items-center gap-2 bg-red-950/50 border border-red-800/40 rounded-xl px-4 py-3 text-sm text-red-300">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                {clipError}
+              <div className="flex items-center gap-2 bg-red-500/8 border border-red-500/20 rounded-xl px-4 py-3 text-sm text-red-400">
+                <AlertCircle className="w-4 h-4 shrink-0" />{clipError}
               </div>
             )}
 
             <button
-              type="submit"
-              disabled={clipLoading || !url.trim() || !startStr.trim() || !endStr.trim()}
-              className="w-full flex items-center justify-center gap-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors rounded-xl py-3 font-semibold text-white text-sm shadow-lg shadow-red-900/20"
+              onClick={handleSubmit}
+              disabled={!canSubmit}
+              className="w-full flex items-center justify-center gap-2 rounded-xl py-3.5 font-bold text-white text-sm transition-all shadow-lg disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ background: canSubmit ? "linear-gradient(135deg,#e53e3e,#c53030)" : "rgba(100,100,100,0.3)" }}
             >
               {clipLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Scissors className="w-4 h-4" />}
-              {clipLoading ? "Enviando..." : "Crear clip"}
+              {clipLoading ? "Enviando a procesar..." : "Crear clip"}
+              {!clipLoading && <ArrowRight className="w-4 h-4 ml-auto" />}
             </button>
-          </form>
+
+            {!user && (
+              <p className="text-center text-xs text-slate-600">
+                <Shield className="w-3 h-3 inline mr-1" />
+                <button onClick={() => {}} className="text-red-400/70 hover:text-red-400 transition-colors">Crea una cuenta</button> para guardar tus clips
+              </p>
+            )}
+          </div>
         </div>
 
+        {/* Clip queue */}
         {clipResults.length > 0 && (
-          <div className="mt-6 space-y-3">
-            <h2 className="text-sm font-medium text-slate-400 uppercase tracking-wider px-1">Cola de clips</h2>
-            {clipResults.map((r) => (
+          <div className="mt-5 space-y-3">
+            <div className="flex items-center gap-2 px-1">
+              <div className="h-px flex-1 bg-white/5" />
+              <span className="text-xs text-slate-600 font-medium uppercase tracking-wider">Cola de clips</span>
+              <div className="h-px flex-1 bg-white/5" />
+            </div>
+            {clipResults.map(r => (
               <ProgressPanel
                 key={r.jobId}
                 jobId={r.jobId}
@@ -275,19 +335,56 @@ export default function Home() {
           </div>
         )}
 
-        <div className="mt-10 grid grid-cols-1 sm:grid-cols-3 gap-4">
+        {/* Feature pills */}
+        <div className="mt-10 flex flex-wrap justify-center gap-2">
           {[
-            { icon: "✂️", title: "Recorta cualquier fragmento", desc: "Segundos o hasta 10 minutos de cualquier video de YouTube." },
-            { icon: "🎬", title: "Calidad a elegir", desc: "Desde 360p hasta 1080p Full HD según lo que necesites." },
-            { icon: "💾", title: "Descarga directa", desc: "Descarga el clip en MP4 directamente a tu dispositivo." },
-          ].map((f) => (
-            <div key={f.title} className="bg-[#161b22] border border-white/5 rounded-xl p-4">
-              <div className="text-2xl mb-2">{f.icon}</div>
-              <p className="text-sm font-semibold text-white">{f.title}</p>
-              <p className="text-xs text-slate-500 mt-1">{f.desc}</p>
+            { icon: "✂️", text: "Hasta 10 min por clip" },
+            { icon: "🎬", text: "360p a 1080p Full HD" },
+            { icon: "💾", text: "Descarga MP4 directa" },
+            { icon: "🔒", text: "Sin cuenta requerida" },
+            { icon: "⚡", text: "Sin marcas de agua" },
+          ].map(f => (
+            <div key={f.text} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-white/5 bg-white/2 text-xs text-slate-500">
+              <span>{f.icon}</span>{f.text}
             </div>
           ))}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function TimeInput({ label, value, onChange, placeholder, max }: {
+  label: string; value: string; onChange: (v: string) => void; placeholder: string; max?: number;
+}) {
+  const secs = (() => { try { return parseTime(value); } catch { return null; } })();
+
+  const setPreset = (s: number) => {
+    if (max && s > max) s = max;
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = Math.floor(s % 60);
+    onChange(h > 0
+      ? `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`
+      : `${m}:${String(sec).padStart(2,"0")}`);
+  };
+
+  return (
+    <div>
+      <div className="relative">
+        <Clock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-600 pointer-events-none" />
+        <input
+          type="text"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder={placeholder}
+          className="w-full rounded-xl pl-8 pr-3 py-3 text-sm font-mono text-white placeholder:text-slate-700 focus:outline-none transition-all border"
+          style={{ background: "rgba(255,255,255,0.04)", borderColor: value ? "rgba(229,62,62,0.3)" : "rgba(255,255,255,0.07)" }}
+        />
+      </div>
+      <div className="flex items-center justify-between mt-1.5">
+        <span className="text-[11px] text-slate-600">{label}</span>
+        {secs !== null && <span className="text-[11px] text-slate-500 font-mono">{formatDuration(secs)}</span>}
       </div>
     </div>
   );
