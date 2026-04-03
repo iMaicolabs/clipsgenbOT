@@ -78,20 +78,35 @@ function updateJob(job: ClipJob, updates: Partial<ClipJob>) {
   jobEmitter.emit(`progress:${job.id}`, { ...job });
 }
 
-function spawnYtdlp(args: string[], onProgress: (pct: number) => void, timeoutMs = 180000): Promise<void> {
+function spawnYtdlp(
+  args: string[],
+  onProgress: (pct: number) => void,
+  timeoutMs = 180000
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn(YTDLP_BIN, args, { shell: false });
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       proc.kill("SIGTERM");
-      reject(new Error("TIMEOUT"));
+      reject(new Error("Tiempo de espera agotado al descargar el video"));
     }, timeoutMs);
 
+    let stdoutBuf = "";
+    let destFile = "";
+
     proc.stdout.on("data", (data: Buffer) => {
-      for (const line of data.toString().split("\n")) {
-        const m = line.match(/\[download\]\s+([\d.]+)%/);
-        if (m) onProgress(parseFloat(m[1]));
+      const text = data.toString();
+      stdoutBuf += text;
+      for (const line of text.split("\n")) {
+        const pct = line.match(/\[download\]\s+([\d.]+)%/);
+        if (pct) onProgress(parseFloat(pct[1]));
+        const dest = line.match(/\[download\] Destination: (.+)/);
+        if (dest) destFile = dest[1].trim();
+        const merge = line.match(/\[Merger\] Merging formats into "(.+)"/);
+        if (merge) destFile = merge[1].trim();
+        const already = line.match(/\[download\] (.+) has already been downloaded/);
+        if (already) destFile = already[1].trim();
       }
     });
 
@@ -101,16 +116,20 @@ function spawnYtdlp(args: string[], onProgress: (pct: number) => void, timeoutMs
     proc.on("close", (code) => {
       clearTimeout(timer);
       if (timedOut) return;
-      if (code === 0) resolve();
-      else {
+      if (code === 0) {
+        resolve(destFile);
+      } else {
         const err: any = new Error(`yt-dlp exit ${code}`);
         err.stderr = stderrBuf;
+        err.stdout = stdoutBuf;
         reject(err);
       }
     });
     proc.on("error", (e) => { clearTimeout(timer); reject(e); });
   });
 }
+
+const PLAYER_CLIENTS = ["default", "ios", "web", "mweb"];
 
 export async function processClipJob(
   jobId: string,
@@ -127,65 +146,95 @@ export async function processClipJob(
   const rawFile = path.join(os.tmpdir(), `cgb_raw_${timestamp}.mp4`);
   const clipFile = path.join(CLIPS_DIR, `clip_${jobId}.mp4`);
   const cookiesArgs = hasCookies() ? ["--cookies", COOKIES_PATH] : [];
-  const jsArgs = ["--js-runtimes", `node:${NODE_BIN}`];
   const fmt = qualityFormat(quality);
 
-  const cleanup = () => { try { if (fs.existsSync(rawFile)) fs.unlinkSync(rawFile); } catch {} };
+  const cleanup = (file: string) => {
+    try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch {}
+  };
 
   try {
     updateJob(job, { status: "processing", progress: 5, progressMsg: "Analizando video..." });
 
-    let downloaded = false;
-    for (const client of ["default", "web"]) {
-      const clientArgs = client === "default" ? [] : ["--extractor-args", `youtube:player_client=${client}`];
+    let downloadedFile: string | null = null;
+    const errors: string[] = [];
+
+    for (const client of PLAYER_CLIENTS) {
+      const clientArgs = client === "default"
+        ? []
+        : ["--extractor-args", `youtube:player_client=${client}`];
+
+      const outArg = rawFile.replace(/\.mp4$/, `.${client}.mp4`);
+
       const args = [
-        ...jsArgs, ...clientArgs, ...cookiesArgs,
+        "--js-runtimes", `node:${NODE_BIN}`,
+        ...clientArgs,
+        ...cookiesArgs,
         "-f", fmt,
         "--merge-output-format", "mp4",
         "--download-sections", `*${startSec}-${endSec}`,
-        "--force-keyframes-at-cuts",
         "--newline",
-        "-o", rawFile, url,
+        "--no-playlist",
+        "-o", outArg,
+        url,
       ];
+
       try {
-        await spawnYtdlp(args, (pct) => {
-          updateJob(job, { progress: Math.round(5 + pct * 0.6), progressMsg: `Descargando... ${pct.toFixed(0)}%` });
+        updateJob(job, { progressMsg: `Descargando (intento ${PLAYER_CLIENTS.indexOf(client) + 1}/${PLAYER_CLIENTS.length})...` });
+        const dest = await spawnYtdlp(args, (pct) => {
+          updateJob(job, {
+            progress: Math.round(5 + pct * 0.7),
+            progressMsg: `Descargando... ${pct.toFixed(0)}%`,
+          });
         }, 120000);
-        if (fs.existsSync(rawFile) && fs.statSync(rawFile).size > 0) {
-          downloaded = true;
+
+        const actualFile = [dest, outArg].find(f => f && fs.existsSync(f) && fs.statSync(f).size > 0);
+        if (actualFile) {
+          downloadedFile = actualFile;
           break;
         }
-      } catch (e) {
-        try { fs.unlinkSync(rawFile); } catch {}
+        errors.push(`${client}: archivo no encontrado tras descarga`);
+        cleanup(outArg);
+      } catch (e: any) {
+        const detail = (e.stderr ?? e.message ?? "").slice(0, 200);
+        logger.warn({ client, jobId, detail }, "yt-dlp client attempt failed");
+        errors.push(`${client}: ${detail}`);
+        cleanup(outArg);
       }
     }
 
-    if (!downloaded) {
-      throw new Error("No se pudo descargar el video. Verifica la URL o intenta más tarde.");
+    if (!downloadedFile) {
+      logger.error({ jobId, errors }, "All yt-dlp clients failed");
+      const hint = errors.some(e => e.includes("Sign in") || e.includes("age"))
+        ? "El video requiere inicio de sesión o tiene restricción de edad."
+        : errors.some(e => e.includes("private") || e.includes("unavailable"))
+        ? "El video es privado o no está disponible."
+        : "No se pudo descargar el video. Verifica que el link sea válido y el video sea público.";
+      throw new Error(hint);
     }
 
-    updateJob(job, { progress: 75, progressMsg: "Recortando clip..." });
+    updateJob(job, { progress: 78, progressMsg: "Recortando clip..." });
 
     const probeOut = await execAsync(
-      `ffprobe -v quiet -print_format json -show_streams "${rawFile}"`,
+      `ffprobe -v quiet -print_format json -show_streams "${downloadedFile}"`,
       { timeout: 10000 }
     ).catch(() => ({ stdout: "{}" }));
     const probeData = JSON.parse((probeOut as any).stdout || "{}");
     const hasAudio = (probeData.streams || []).some((s: any) => s.codec_type === "audio");
 
-    if (hasAudio) {
-      await execAsync(
-        `ffmpeg -y -i "${rawFile}" -ss 0 -t ${duration} -map 0:v:0 -map 0:a:0 -c:v libx264 -c:a aac -preset fast -movflags +faststart "${clipFile}"`,
-        { timeout: 60000 }
-      );
-    } else {
-      await execAsync(
-        `ffmpeg -y -i "${rawFile}" -ss 0 -t ${duration} -map 0:v:0 -c:v libx264 -preset fast -an -movflags +faststart "${clipFile}"`,
-        { timeout: 60000 }
-      );
-    }
+    const ffmpegAudioArgs = hasAudio
+      ? ["-map", "0:v:0", "-map", "0:a:0", "-c:v", "libx264", "-c:a", "aac", "-preset", "fast", "-movflags", "+faststart"]
+      : ["-map", "0:v:0", "-c:v", "libx264", "-preset", "fast", "-an", "-movflags", "+faststart"];
 
-    if (!fs.existsSync(clipFile)) throw new Error("El recorte falló");
+    await execAsync(
+      `ffmpeg -y -i "${downloadedFile}" -ss 0 -t ${duration} ${ffmpegAudioArgs.join(" ")} "${clipFile}"`,
+      { timeout: 120000 }
+    );
+
+    cleanup(downloadedFile);
+
+    if (!fs.existsSync(clipFile) || fs.statSync(clipFile).size === 0) {
+      throw new Error("El recorte falló — el archivo de salida está vacío");
+    }
 
     const stats = fs.statSync(clipFile);
     updateJob(job, {
@@ -196,6 +245,7 @@ export async function processClipJob(
       sizeBytes: stats.size,
     });
     logger.info({ jobId, sizeMB: (stats.size / 1024 / 1024).toFixed(1) }, "Clip job done");
+
   } catch (err: any) {
     logger.error({ err, jobId }, "Clip job error");
     updateJob(job, {
@@ -204,7 +254,5 @@ export async function processClipJob(
       progressMsg: "",
       error: err.message ?? "Error desconocido",
     });
-  } finally {
-    cleanup();
   }
 }
