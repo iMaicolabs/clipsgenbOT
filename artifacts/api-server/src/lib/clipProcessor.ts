@@ -79,18 +79,27 @@ function updateJob(job: ClipJob, updates: Partial<ClipJob>) {
   jobEmitter.emit(`progress:${job.id}`, { ...job });
 }
 
+function cleanup(...files: string[]) {
+  for (const f of files) {
+    try { if (f && fs.existsSync(f)) fs.unlinkSync(f); } catch {}
+  }
+}
+
+// Spawns one yt-dlp process and resolves with the output file path
 function spawnYtdlp(
   args: string[],
   onProgress: (pct: number) => void,
-  timeoutMs = 180000
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(YTDLP_BIN, args, { shell: false });
+  timeoutMs = 60000
+): { promise: Promise<string>; kill: () => void } {
+  let proc: ReturnType<typeof spawn> | null = null;
+
+  const promise = new Promise<string>((resolve, reject) => {
+    proc = spawn(YTDLP_BIN, args, { shell: false });
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      proc.kill("SIGTERM");
-      reject(new Error("Tiempo de espera agotado al descargar el video"));
+      proc?.kill("SIGTERM");
+      reject(new Error("timeout"));
     }, timeoutMs);
 
     let stdoutBuf = "";
@@ -128,9 +137,110 @@ function spawnYtdlp(
     });
     proc.on("error", (e) => { clearTimeout(timer); reject(e); });
   });
+
+  return {
+    promise,
+    kill: () => { try { proc?.kill("SIGTERM"); } catch {} },
+  };
 }
 
 const PLAYER_CLIENTS = ["ios", "android_creator", "tv_embedded", "default", "web", "mweb"];
+
+// Runs all yt-dlp clients in PARALLEL — resolves with first successful file
+async function raceYtdlpClients(
+  url: string,
+  fmt: string,
+  startSec: number,
+  endSec: number,
+  cookiesArgs: string[],
+  timestamp: number,
+  onProgress: (pct: number) => void
+): Promise<{ file: string; errors: string[] }> {
+  const errors: string[] = [];
+  const handles: Array<{ client: string; kill: () => void; outArg: string }> = [];
+
+  const clientPromises = PLAYER_CLIENTS.map(async (client) => {
+    const clientArgs = client === "default"
+      ? []
+      : ["--extractor-args", `youtube:player_client=${client}`];
+
+    const outArg = path.join(os.tmpdir(), `cgb_${timestamp}_${client}.mp4`);
+
+    const args = [
+      "--js-runtimes", `node:${NODE_BIN}`,
+      ...clientArgs,
+      ...cookiesArgs,
+      "-f", fmt,
+      "--merge-output-format", "mp4",
+      "--download-sections", `*${startSec}-${endSec}`,
+      "--newline",
+      "--no-playlist",
+      "--concurrent-fragments", "4",
+      "-o", outArg,
+      url,
+    ];
+
+    const handle = spawnYtdlp(args, onProgress, 60000);
+    handles.push({ client, kill: handle.kill, outArg });
+
+    const dest = await handle.promise;
+    const actualFile = [dest, outArg].find(f => f && fs.existsSync(f) && fs.statSync(f).size > 1000);
+    if (!actualFile) throw new Error("empty output");
+    return actualFile;
+  });
+
+  // Promise.any resolves as soon as ONE succeeds
+  try {
+    const winner = await Promise.any(clientPromises);
+
+    // Kill all other processes to free resources
+    for (const h of handles) {
+      if (h.outArg !== winner) {
+        h.kill();
+        cleanup(h.outArg);
+      }
+    }
+
+    return { file: winner, errors };
+  } catch (aggErr: any) {
+    // All clients failed — collect their error messages
+    const errs = (aggErr.errors ?? []) as any[];
+    for (let i = 0; i < PLAYER_CLIENTS.length; i++) {
+      const e = errs[i];
+      const msg = e?.stderr ?? e?.message ?? String(e);
+      errors.push(`${PLAYER_CLIENTS[i]}: ${msg.slice(0, 200)}`);
+    }
+    // Cleanup all temp files
+    for (const h of handles) cleanup(h.outArg);
+    return { file: "", errors };
+  }
+}
+
+// Fast remux without re-encoding — preserves original quality, near-instant
+async function fastMux(inputFile: string, outputFile: string, duration: number): Promise<boolean> {
+  try {
+    await execAsync(
+      `ffmpeg -y -i "${inputFile}" -t ${duration} -c copy -avoid_negative_ts make_zero -movflags +faststart "${outputFile}"`,
+      { timeout: 30000 }
+    );
+    const size = fs.existsSync(outputFile) ? fs.statSync(outputFile).size : 0;
+    return size > 1000;
+  } catch {
+    return false;
+  }
+}
+
+// Fallback: re-encode audio only (keep video stream, just re-encode audio to aac for compatibility)
+async function muxWithAudioReencode(inputFile: string, outputFile: string, duration: number, hasAudio: boolean): Promise<void> {
+  const audioArgs = hasAudio
+    ? ["-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"]
+    : ["-map", "0:v:0", "-c:v", "copy", "-an", "-movflags", "+faststart"];
+
+  await execAsync(
+    `ffmpeg -y -i "${inputFile}" -t ${duration} ${audioArgs.join(" ")} "${outputFile}"`,
+    { timeout: 60000 }
+  );
+}
 
 export async function processClipJob(
   jobId: string,
@@ -144,109 +254,63 @@ export async function processClipJob(
 
   const duration = endSec - startSec;
   const timestamp = Date.now();
-  const rawFile = path.join(os.tmpdir(), `cgb_raw_${timestamp}.mp4`);
   const clipFile = path.join(CLIPS_DIR, `clip_${jobId}.mp4`);
   const cookiesArgs = hasCookies() ? ["--cookies", COOKIES_PATH] : [];
   const fmt = qualityFormat(quality);
 
-  const cleanup = (file: string) => {
-    try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch {}
-  };
-
   try {
-    updateJob(job, { status: "processing", progress: 5, progressMsg: "Analizando video..." });
+    updateJob(job, { status: "processing", progress: 5, progressMsg: "Descargando..." });
 
-    let downloadedFile: string | null = null;
-    const errors: string[] = [];
-
-    for (const client of PLAYER_CLIENTS) {
-      const clientArgs = client === "default"
-        ? []
-        : ["--extractor-args", `youtube:player_client=${client}`];
-
-      const outArg = rawFile.replace(/\.mp4$/, `.${client}.mp4`);
-
-      const args = [
-        "--js-runtimes", `node:${NODE_BIN}`,
-        ...clientArgs,
-        ...cookiesArgs,
-        "-f", fmt,
-        "--merge-output-format", "mp4",
-        "--download-sections", `*${startSec}-${endSec}`,
-        "--newline",
-        "--no-playlist",
-        "-o", outArg,
-        url,
-      ];
-
-      try {
-        updateJob(job, { progressMsg: `Descargando (intento ${PLAYER_CLIENTS.indexOf(client) + 1}/${PLAYER_CLIENTS.length})...` });
-        const dest = await spawnYtdlp(args, (pct) => {
-          updateJob(job, {
-            progress: Math.round(5 + pct * 0.7),
-            progressMsg: `Descargando... ${pct.toFixed(0)}%`,
-          });
-        }, 120000);
-
-        const actualFile = [dest, outArg].find(f => f && fs.existsSync(f) && fs.statSync(f).size > 0);
-        if (actualFile) {
-          downloadedFile = actualFile;
-          break;
-        }
-        errors.push(`${client}: archivo no encontrado tras descarga`);
-        cleanup(outArg);
-      } catch (e: any) {
-        const detail = (e.stderr ?? e.message ?? "").slice(0, 200);
-        logger.warn({ client, jobId, detail }, "yt-dlp client attempt failed");
-        errors.push(`${client}: ${detail}`);
-        cleanup(outArg);
-      }
-    }
+    // ── 1. Race all yt-dlp clients in parallel ──────────────────────────────
+    const { file: downloadedFile, errors } = await raceYtdlpClients(
+      url, fmt, startSec, endSec, cookiesArgs, timestamp,
+      (pct) => updateJob(job, {
+        progress: Math.round(5 + pct * 0.75),
+        progressMsg: `Descargando... ${pct.toFixed(0)}%`,
+      })
+    );
 
     if (!downloadedFile) {
+      // ── 2. Piped fallback ─────────────────────────────────────────────────
       logger.warn({ jobId, errors }, "All yt-dlp clients failed — trying Piped fallback");
       updateJob(job, { progress: 40, progressMsg: "Usando servidor alternativo..." });
 
       try {
         const qualityNum = parseInt(quality) || 720;
         const piped = await getPipedStreams(url, qualityNum);
-        logger.info({ jobId, instance: "piped" }, "Piped streams obtained");
 
         updateJob(job, { progress: 50, progressMsg: "Descargando con servidor alternativo..." });
 
-        // Use ffmpeg to download both streams simultaneously and cut to section
         await execAsync(
           `ffmpeg -y -ss ${startSec} -t ${duration} -i "${piped.videoUrl}" -ss ${startSec} -t ${duration} -i "${piped.audioUrl}" ` +
-          `-map 0:v:0 -map 1:a:0 -c:v libx264 -c:a aac -preset fast -movflags +faststart "${clipFile}"`,
-          { timeout: 180000 }
+          `-map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 128k -avoid_negative_ts make_zero -movflags +faststart "${clipFile}"`,
+          { timeout: 120000 }
         );
         updateJob(job, { progress: 95, progressMsg: "Finalizando..." });
       } catch (pipedErr: any) {
         logger.error({ jobId, pipedErr, ytdlpErrors: errors }, "Piped fallback also failed");
         const isPrivate = errors.some(e => /private|unavailable|not available/i.test(e));
-        const hint = isPrivate
+        throw new Error(isPrivate
           ? "El video es privado o no está disponible en tu región."
-          : "No se pudo descargar el video. Es posible que YouTube esté bloqueando temporalmente las descargas desde este servidor. Intenta más tarde.";
-        throw new Error(hint);
+          : "No se pudo descargar el video. Es posible que YouTube esté bloqueando temporalmente las descargas desde este servidor. Intenta más tarde."
+        );
       }
     } else {
-      updateJob(job, { progress: 78, progressMsg: "Recortando clip..." });
+      // ── 3. Fast remux — no re-encoding, preserves original quality ────────
+      updateJob(job, { progress: 82, progressMsg: "Procesando clip..." });
 
-      const probeOut = await execAsync(
-        `ffprobe -v quiet -print_format json -show_streams "${downloadedFile}"`,
-        { timeout: 10000 }
-      ).catch(() => ({ stdout: "{}" }));
-      const probeData = JSON.parse((probeOut as any).stdout || "{}");
-      const hasAudio = (probeData.streams || []).some((s: any) => s.codec_type === "audio");
+      const ok = await fastMux(downloadedFile, clipFile, duration);
 
-      const ffmpegAudioArgs = hasAudio
-        ? ["-map", "0:v:0", "-map", "0:a:0", "-c:v", "libx264", "-c:a", "aac", "-preset", "fast", "-movflags", "+faststart"]
-        : ["-map", "0:v:0", "-c:v", "libx264", "-preset", "fast", "-an", "-movflags", "+faststart"];
-
-      await execAsync(
-        `ffmpeg -y -i "${downloadedFile}" -ss 0 -t ${duration} ${ffmpegAudioArgs.join(" ")} "${clipFile}"`,
-        { timeout: 120000 }
-      );
+      if (!ok) {
+        // Fallback: re-encode only audio (keep video untouched)
+        const probeOut = await execAsync(
+          `ffprobe -v quiet -print_format json -show_streams "${downloadedFile}"`,
+          { timeout: 10000 }
+        ).catch(() => ({ stdout: "{}" }));
+        const probeData = JSON.parse((probeOut as any).stdout || "{}");
+        const hasAudio = (probeData.streams || []).some((s: any) => s.codec_type === "audio");
+        await muxWithAudioReencode(downloadedFile, clipFile, duration, hasAudio);
+      }
 
       cleanup(downloadedFile);
     }
