@@ -111,7 +111,7 @@ export default function Home() {
       setClipError(err.message); return;
     }
     if (endSec <= startSec) { setClipError("El tiempo de fin debe ser mayor que el de inicio"); return; }
-    if (endSec - startSec > 600) { setClipError("El clip no puede durar más de 10 minutos"); return; }
+    if (endSec - startSec > 3600) { setClipError("El clip no puede durar más de 60 minutos"); return; }
 
     setClipLoading(true);
     try {
@@ -373,7 +373,7 @@ export default function Home() {
         {/* Feature pills */}
         <div className="mt-10 flex flex-wrap justify-center gap-2">
           {[
-            { icon: "✂️", text: "Hasta 10 min por clip" },
+            { icon: "✂️", text: "Hasta 60 min por clip" },
             { icon: "🎬", text: "360p a 1080p Full HD" },
             { icon: "💾", text: "Descarga MP4 directa" },
             { icon: "🔒", text: "Sin cuenta requerida" },
