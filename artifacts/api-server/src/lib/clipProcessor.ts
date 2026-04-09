@@ -249,27 +249,6 @@ async function probeStreamStarts(inputFile: string): Promise<{ vStart: number; a
   }
 }
 
-// Build the ffmpeg input arguments that align video and audio start times.
-// Uses -itsoffset on whichever stream starts earlier so both end up at the same
-// point in the output timeline. avoid_negative_ts make_zero then shifts everything to 0.
-function syncedInputArgs(inputFile: string, vStart: number, aStart: number): string {
-  const diff = Math.abs(vStart - aStart);
-  if (diff < 0.05) {
-    // Streams are already in sync — single input
-    return `-i "${inputFile}"`;
-  }
-
-  const offset = diff.toFixed(4);
-  if (aStart > vStart) {
-    // Audio starts later → apply itsoffset to video input so video timestamps
-    // advance to meet the audio start. Streams end up at the same output time.
-    return `-itsoffset ${offset} -i "${inputFile}" -i "${inputFile}" -map 0:v:0 -map 1:a:0`;
-  } else {
-    // Video starts later → offset audio input
-    return `-i "${inputFile}" -itsoffset ${offset} -i "${inputFile}" -map 0:v:0 -map 1:a:0`;
-  }
-}
-
 // Fast remux without re-encoding — preserves original quality, near-instant.
 async function fastMux(inputFile: string, outputFile: string, duration: number): Promise<boolean> {
   try {
@@ -297,28 +276,50 @@ async function muxWithAudioReencode(inputFile: string, outputFile: string, durat
 }
 
 // Fix audio/video stream desync in the final clip.
-// yt-dlp merges DASH streams preserving edit lists (so ffprobe reports 0/0),
-// but -c copy exposes the raw PTS values causing video/audio to start at different times.
-// This post-process step detects and corrects any such offset in the output clip.
-async function fixStreamSync(clipFile: string, duration: number): Promise<void> {
+// yt-dlp downloads video from the nearest keyframe BEFORE the requested start,
+// while audio starts at the exact requested time. This creates a PTS gap
+// (e.g. video=0.033s, audio=1.926s) that must be corrected by trimming both
+// streams to the later start time (aStart) so content is aligned.
+// Re-encoding is required because stream copy cannot seek to non-keyframe boundaries.
+async function fixStreamSync(
+  clipFile: string,
+  duration: number,
+  onProgress?: (msg: string) => void
+): Promise<void> {
   const { vStart, aStart } = await probeStreamStarts(clipFile);
-  const diff = Math.abs(vStart - aStart);
-  if (diff < 0.05) return; // Already in sync
+  const diff = aStart - vStart; // positive = audio starts later = video has extra early frames
+  if (Math.abs(diff) < 0.05) return; // Already in sync
 
-  logger.info({ vStart, aStart, diff }, "Fixing stream desync in clip");
-  const inputArgs = syncedInputArgs(clipFile, vStart, aStart);
+  // We only handle the case where video starts before audio (the common case).
+  // If audio starts before video (unusual), just leave it — gap is small.
+  if (diff <= 0) return;
+
+  logger.info({ vStart, aStart, diff }, "Fixing stream desync — re-encoding");
+  onProgress?.("Sincronizando audio y video...");
   const tmpFile = clipFile + ".sync.mp4";
+  const adjustedDuration = Math.max(1, duration - diff);
+
+  // Trim both streams to start from aStart (user's requested time).
+  // setpts/asetpts resets timestamps to 0. Re-encode required for frame-accurate trim.
+  const filterComplex =
+    `[0:v]trim=start=${aStart.toFixed(6)},setpts=PTS-STARTPTS[v];` +
+    `[0:a]atrim=start=${aStart.toFixed(6)},asetpts=PTS-STARTPTS[a]`;
 
   try {
     await execAsync(
-      `ffmpeg -y ${inputArgs} -t ${duration} -c copy -avoid_negative_ts make_zero -movflags +faststart "${tmpFile}"`,
-      { timeout: 60000 }
+      `ffmpeg -y -i "${clipFile}" ` +
+      `-filter_complex "${filterComplex}" ` +
+      `-map "[v]" -map "[a]" ` +
+      `-t ${adjustedDuration.toFixed(4)} ` +
+      `-c:v libx264 -preset ultrafast -crf 18 -c:a aac -b:a 128k -movflags +faststart "${tmpFile}"`,
+      { timeout: 300000 }
     );
     if (fs.existsSync(tmpFile) && fs.statSync(tmpFile).size > 1000) {
       fs.renameSync(tmpFile, clipFile);
-      logger.info({ diff }, "Stream desync fixed");
+      logger.info({ diff, adjustedDuration }, "Stream desync fixed");
     }
-  } catch {
+  } catch (e: any) {
+    logger.error({ err: e?.message }, "fixStreamSync failed");
     cleanup(tmpFile);
   }
 }
@@ -398,7 +399,9 @@ export async function processClipJob(
 
     // Fix audio/video stream desync that arises when -c copy exposes raw PTS
     // values from yt-dlp's edit-list-wrapped DASH segments.
-    await fixStreamSync(clipFile, duration);
+    await fixStreamSync(clipFile, duration, (msg) =>
+      updateJob(job, { progress: 92, progressMsg: msg })
+    );
 
     if (!fs.existsSync(clipFile) || fs.statSync(clipFile).size === 0) {
       throw new Error("El recorte falló — el archivo de salida está vacío");
