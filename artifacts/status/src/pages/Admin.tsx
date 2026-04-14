@@ -2,6 +2,28 @@ import { useState, useEffect, useRef } from "react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
+function CopyCode({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    navigator.clipboard.writeText(code).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+  return (
+    <button
+      onClick={copy}
+      className="inline-flex items-center gap-2 bg-zinc-700 hover:bg-zinc-600 active:bg-zinc-500 px-3 py-1 rounded-lg transition-colors group"
+      title="Copiar código"
+    >
+      <code className="text-white font-mono text-lg tracking-widest">{code}</code>
+      <span className="text-zinc-400 group-hover:text-zinc-200 transition-colors text-sm">
+        {copied ? "✓" : "⎘"}
+      </span>
+    </button>
+  );
+}
+
 interface CookieStatus {
   hasCookies: boolean;
   hasOAuth: boolean;
@@ -182,11 +204,9 @@ export default function Admin() {
                 </li>
                 <li className="flex gap-3">
                   <span className="text-red-500 font-bold">2.</span>
-                  <span>
+                  <span className="flex items-center gap-2 flex-wrap">
                     Ingresa el código:{" "}
-                    <code className="bg-zinc-700 px-3 py-1 rounded-lg text-white font-mono text-lg tracking-widest">
-                      {oauthSession.userCode}
-                    </code>
+                    <CopyCode code={oauthSession.userCode} />
                   </span>
                 </li>
                 <li className="flex gap-3">
