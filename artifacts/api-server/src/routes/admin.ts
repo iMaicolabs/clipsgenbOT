@@ -147,9 +147,12 @@ router.post("/admin/oauth2/start", (_req, res) => {
   });
 
   proc.on("close", (code) => {
-    logger.info({ code }, "oauth2 process exited");
+    logger.info({ code, hasToken: hasOAuthToken() }, "oauth2 process exited");
     if (oauthSession) {
-      if (code === 0) {
+      // Token saved = auth completed, even if the test video download failed
+      if (hasOAuthToken()) {
+        oauthSession.done = true;
+      } else if (code === 0) {
         oauthSession.done = true;
       } else {
         oauthSession.error = `yt-dlp exited with code ${code}`;
