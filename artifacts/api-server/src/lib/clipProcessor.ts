@@ -87,9 +87,12 @@ export function hasOAuthToken(): boolean {
   }
 }
 
-// Returns yt-dlp auth args: OAuth2 if token exists, cookies if file exists, else none
+// Returns yt-dlp auth args: cookies if file exists, else none.
+// NOTE: OAuth2 (--username oauth2) is intentionally NOT used here — the yt-dlp
+// youtube-oauth2 plugin adds Bearer auth headers to ALL youtube.com requests
+// including InnerTube API calls, which YouTube rejects with HTTP 400.
+// Cookies-based auth is safe and doesn't interfere with InnerTube.
 function getAuthArgs(): string[] {
-  if (hasOAuthToken()) return ["--username", "oauth2", "--password", ""];
   if (hasCookies()) return ["--cookies", COOKIES_PATH];
   return [];
 }
