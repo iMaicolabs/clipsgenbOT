@@ -372,8 +372,11 @@ export async function processClipJob(
       } catch (pipedErr: any) {
         logger.error({ jobId, pipedErr, ytdlpErrors: errors }, "Piped fallback also failed");
         const isPrivate = errors.some(e => /private|unavailable|not available/i.test(e));
+        const isBot = errors.some(e => /Sign in to confirm|bot|cookies/i.test(e));
         throw new Error(isPrivate
           ? "El video es privado o no está disponible en tu región."
+          : isBot
+          ? "YouTube está bloqueando este video por detección de bots. Por favor actualiza las cookies del servidor."
           : "No se pudo descargar el video. Es posible que YouTube esté bloqueando temporalmente las descargas desde este servidor. Intenta más tarde."
         );
       }
