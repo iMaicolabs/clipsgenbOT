@@ -3,6 +3,7 @@ import { AuthProvider } from "@/contexts/AuthContext";
 import Navbar from "@/components/Navbar";
 import Home from "@/pages/Home";
 import MyClips from "@/pages/MyClips";
+import Admin from "@/pages/Admin";
 import NotFound from "@/pages/not-found";
 
 export default function App() {
@@ -13,6 +14,7 @@ export default function App() {
         <Switch>
           <Route path="/" component={Home} />
           <Route path="/mis-clips" component={MyClips} />
+          <Route path="/admin" component={Admin} />
           <Route component={NotFound} />
         </Switch>
       </div>

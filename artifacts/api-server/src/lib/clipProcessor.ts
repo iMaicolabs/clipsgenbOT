@@ -1,4 +1,4 @@
-import { spawn, exec, execSync } from "child_process";
+import { spawn, exec, execSync, spawnSync } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import path from "path";
@@ -22,12 +22,74 @@ const NODE_BIN = (() => {
   catch { return "node"; }
 })();
 
+const PO_TOKEN_CLI = path.resolve(
+  path.join(__dirname, "../../../node_modules/youtube-po-token-generator/bin/cli.mjs")
+);
+
 if (!fs.existsSync(CLIPS_DIR)) {
   fs.mkdirSync(CLIPS_DIR, { recursive: true });
 }
 
+// ── PO Token cache (valid 5 minutes) ────────────────────────────────────────
+interface PoTokenResult { visitorData: string; poToken: string }
+let _poTokenCache: { result: PoTokenResult; expiresAt: number } | null = null;
+let _poTokenInFlight: Promise<PoTokenResult | null> | null = null;
+
+async function generatePoToken(): Promise<PoTokenResult | null> {
+  const now = Date.now();
+  if (_poTokenCache && now < _poTokenCache.expiresAt) return _poTokenCache.result;
+  if (_poTokenInFlight) return _poTokenInFlight;
+
+  _poTokenInFlight = new Promise<PoTokenResult | null>((resolve) => {
+    if (!fs.existsSync(PO_TOKEN_CLI)) {
+      logger.warn({ path: PO_TOKEN_CLI }, "PO token CLI not found");
+      return resolve(null);
+    }
+    const proc = spawnSync(NODE_BIN, [PO_TOKEN_CLI], { timeout: 15000, encoding: "utf8" });
+    if (proc.error || proc.status !== 0) {
+      logger.warn({ err: proc.error?.message, stderr: proc.stderr?.slice(0, 200) }, "PO token generation failed");
+      return resolve(null);
+    }
+    try {
+      const parsed = JSON.parse(proc.stdout.trim()) as PoTokenResult;
+      if (parsed.visitorData && parsed.poToken) {
+        _poTokenCache = { result: parsed, expiresAt: Date.now() + 5 * 60 * 1000 };
+        logger.info({ visitorData: parsed.visitorData.slice(0, 20) }, "PO token generated OK");
+        resolve(parsed);
+      } else {
+        resolve(null);
+      }
+    } catch {
+      resolve(null);
+    }
+  }).finally(() => { _poTokenInFlight = null; });
+
+  return _poTokenInFlight;
+}
+
 export function hasCookies(): boolean {
   return fs.existsSync(COOKIES_PATH) && fs.statSync(COOKIES_PATH).size > 100;
+}
+
+const OAUTH_CACHE_PATH = path.join(
+  os.homedir(), ".cache", "yt-dlp", "youtube-oauth2", "token_data.json"
+);
+
+export function hasOAuthToken(): boolean {
+  try {
+    if (!fs.existsSync(OAUTH_CACHE_PATH)) return false;
+    const d = JSON.parse(fs.readFileSync(OAUTH_CACHE_PATH, "utf8"));
+    return !!(d?.refresh_token || d?.access_token);
+  } catch {
+    return false;
+  }
+}
+
+// Returns yt-dlp auth args: OAuth2 if token exists, cookies if file exists, else none
+function getAuthArgs(): string[] {
+  if (hasOAuthToken()) return ["--username", "oauth2", "--password", ""];
+  if (hasCookies()) return ["--cookies", COOKIES_PATH];
+  return [];
 }
 
 export interface ClipJob {
@@ -53,8 +115,10 @@ export interface VideoInfo {
 }
 
 export async function getVideoInfo(url: string): Promise<VideoInfo> {
+  const authArgs = getAuthArgs().map(a => `"${a}"`).join(" ");
+  const authFlag = authArgs ? ` ${authArgs}` : "";
   const { stdout } = await execAsync(
-    `"${YTDLP_BIN}" --js-runtimes "node:${NODE_BIN}" --print-json --skip-download --no-playlist "${url}"`,
+    `"${YTDLP_BIN}" --js-runtimes "node:${NODE_BIN}"${authFlag} --print-json --skip-download --no-playlist "${url}"`,
     { timeout: 30000 }
   );
   const data = JSON.parse(stdout.trim());
@@ -146,7 +210,22 @@ function spawnYtdlp(
 
 const PLAYER_CLIENTS = ["ios", "android_creator", "tv_embedded", "default", "web", "mweb"];
 
-// Runs all yt-dlp clients in PARALLEL — resolves with first successful file
+// Builds extractor-args for a yt-dlp client, optionally injecting a PO token.
+function buildClientArgs(
+  client: string,
+  poToken: PoTokenResult | null
+): string[] {
+  if (client === "default") return [];
+
+  let extractorVal = `youtube:player_client=${client}`;
+  if (poToken) {
+    extractorVal += `;po_token=${client}+${poToken.poToken};visitor_data=${poToken.visitorData}`;
+  }
+  return ["--extractor-args", extractorVal];
+}
+
+// Runs all yt-dlp clients in PARALLEL — resolves with first successful file.
+// Also generates a fresh PO token upfront and adds an extra web+PO attempt.
 async function raceYtdlpClients(
   url: string,
   fmt: string,
@@ -159,6 +238,9 @@ async function raceYtdlpClients(
   const errors: string[] = [];
   const handles: Array<{ client: string; kill: () => void; outArg: string }> = [];
 
+  // Generate PO token in parallel with the first client launches
+  const poTokenPromise = generatePoToken();
+
   // Only report the highest progress seen across all parallel clients (no chaotic jumps)
   let bestPct = 0;
   const throttledProgress = (pct: number) => {
@@ -168,12 +250,22 @@ async function raceYtdlpClients(
     }
   };
 
-  const clientPromises = PLAYER_CLIENTS.map(async (client) => {
-    const clientArgs = client === "default"
-      ? []
-      : ["--extractor-args", `youtube:player_client=${client}`];
+  // Wait for PO token (max 15s already enforced inside generatePoToken)
+  const poToken = await poTokenPromise;
+  if (poToken) {
+    logger.info("PO token ready for race");
+  }
 
-    const outArg = path.join(os.tmpdir(), `cgb_${timestamp}_${client}.mp4`);
+  // Build client list: regular clients + an extra "web" attempt with PO token
+  const allClients: Array<{ client: string; usePo: boolean }> = [
+    ...PLAYER_CLIENTS.map(c => ({ client: c, usePo: false })),
+    ...(poToken ? [{ client: "web", usePo: true }] : []),
+  ];
+
+  const clientPromises = allClients.map(async ({ client, usePo }) => {
+    const clientArgs = buildClientArgs(client, usePo ? poToken : null);
+    const suffix = usePo ? `${client}_po` : client;
+    const outArg = path.join(os.tmpdir(), `cgb_${timestamp}_${suffix}.mp4`);
 
     const args = [
       "--js-runtimes", `node:${NODE_BIN}`,
@@ -190,7 +282,7 @@ async function raceYtdlpClients(
     ];
 
     const handle = spawnYtdlp(args, throttledProgress, 60000);
-    handles.push({ client, kill: handle.kill, outArg });
+    handles.push({ client: suffix, kill: handle.kill, outArg });
 
     const dest = await handle.promise;
     const actualFile = [dest, outArg].find(f => f && fs.existsSync(f) && fs.statSync(f).size > 1000);
@@ -214,10 +306,10 @@ async function raceYtdlpClients(
   } catch (aggErr: any) {
     // All clients failed — collect their error messages
     const errs = (aggErr.errors ?? []) as any[];
-    for (let i = 0; i < PLAYER_CLIENTS.length; i++) {
+    for (let i = 0; i < allClients.length; i++) {
       const e = errs[i];
       const msg = e?.stderr ?? e?.message ?? String(e);
-      errors.push(`${PLAYER_CLIENTS[i]}: ${msg.slice(0, 200)}`);
+      errors.push(`${allClients[i].client}${allClients[i].usePo ? "(po)" : ""}: ${msg.slice(0, 200)}`);
     }
     // Cleanup all temp files
     for (const h of handles) cleanup(h.outArg);
@@ -337,7 +429,7 @@ export async function processClipJob(
   const duration = endSec - startSec;
   const timestamp = Date.now();
   const clipFile = path.join(CLIPS_DIR, `clip_${jobId}.mp4`);
-  const cookiesArgs = hasCookies() ? ["--cookies", COOKIES_PATH] : [];
+  const cookiesArgs = getAuthArgs();
   const fmt = qualityFormat(quality);
 
   try {
