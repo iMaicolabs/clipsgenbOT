@@ -72,7 +72,8 @@ export function hasCookies(): boolean {
 }
 
 const OAUTH_CACHE_PATH = path.join(
-  os.homedir(), ".cache", "yt-dlp", "youtube-oauth2", "token_data.json"
+  process.env["XDG_CACHE_HOME"] || path.join(os.homedir(), ".cache"),
+  "yt-dlp", "youtube-oauth2", "token_data.json"
 );
 
 export function hasOAuthToken(): boolean {

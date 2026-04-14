@@ -8,7 +8,10 @@ import { logger } from "../lib/logger";
 
 const router = Router();
 const COOKIES_PATH = path.join(DATA_DIR, "yt_cookies.txt");
-const OAUTH_CACHE_PATH = path.join(os.homedir(), ".cache", "yt-dlp", "youtube-oauth2", "token_data.json");
+const OAUTH_CACHE_PATH = path.join(
+  process.env["XDG_CACHE_HOME"] || path.join(os.homedir(), ".cache"),
+  "yt-dlp", "youtube-oauth2", "token_data.json"
+);
 
 const YTDLP_BIN =
   process.env["YTDLP_BIN"] ??
