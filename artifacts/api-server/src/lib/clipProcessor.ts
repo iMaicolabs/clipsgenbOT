@@ -80,7 +80,8 @@ export function hasOAuthToken(): boolean {
   try {
     if (!fs.existsSync(OAUTH_CACHE_PATH)) return false;
     const d = JSON.parse(fs.readFileSync(OAUTH_CACHE_PATH, "utf8"));
-    return !!(d?.refresh_token || d?.access_token);
+    const tokenData = d?.data ?? d;
+    return !!(tokenData?.refresh_token || tokenData?.access_token);
   } catch {
     return false;
   }
