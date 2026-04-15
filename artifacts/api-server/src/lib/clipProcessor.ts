@@ -278,7 +278,7 @@ async function raceYtdlpClients(
       ...cookiesArgs,
       "-f", fmt,
       "--merge-output-format", "mp4",
-      "--download-sections", `*${startSec}-${endSec}`,
+      "--download-sections", `*${startSec}-${endSec + 5}`,
       "--newline",
       "--no-playlist",
       "--concurrent-fragments", "4",
@@ -373,10 +373,9 @@ async function muxWithAudioReencode(inputFile: string, outputFile: string, durat
 }
 
 // Fix audio/video stream desync in the final clip.
-// yt-dlp downloads video from the nearest keyframe BEFORE the requested start,
-// while audio starts at the exact requested time. This creates a PTS gap
-// (e.g. video=0.033s, audio=1.926s) that must be corrected by trimming both
-// streams to the later start time (aStart) so content is aligned.
+// yt-dlp DASH merging often creates a PTS gap between video and audio streams.
+// The later-starting stream is trimmed and both are re-synced to PTS=0.
+// The +5s buffer downloaded upfront ensures there is enough content after the trim.
 // Re-encoding is required because stream copy cannot seek to non-keyframe boundaries.
 async function fixStreamSync(
   clipFile: string,
@@ -384,36 +383,33 @@ async function fixStreamSync(
   onProgress?: (msg: string) => void
 ): Promise<void> {
   const { vStart, aStart } = await probeStreamStarts(clipFile);
-  const diff = aStart - vStart; // positive = audio starts later = video has extra early frames
+  const diff = aStart - vStart; // positive = audio starts later, negative = video starts later
   if (Math.abs(diff) < 0.05) return; // Already in sync
-
-  // We only handle the case where video starts before audio (the common case).
-  // If audio starts before video (unusual), just leave it — gap is small.
-  if (diff <= 0) return;
 
   logger.info({ vStart, aStart, diff }, "Fixing stream desync — re-encoding");
   onProgress?.("Sincronizando audio y video...");
   const tmpFile = clipFile + ".sync.mp4";
-  const adjustedDuration = Math.max(1, duration - diff);
 
-  // Trim both streams to start from aStart (user's requested time).
+  // Trim both streams to the LATER start time so content is aligned.
+  // The +5s buffer downloaded upfront ensures there is enough content after the trim.
   // setpts/asetpts resets timestamps to 0. Re-encode required for frame-accurate trim.
+  const trimStart = Math.max(vStart, aStart); // whichever stream starts later
   const filterComplex =
-    `[0:v]trim=start=${aStart.toFixed(6)},setpts=PTS-STARTPTS[v];` +
-    `[0:a]atrim=start=${aStart.toFixed(6)},asetpts=PTS-STARTPTS[a]`;
+    `[0:v]trim=start=${trimStart.toFixed(6)}:duration=${duration.toFixed(6)},setpts=PTS-STARTPTS[v];` +
+    `[0:a]atrim=start=${trimStart.toFixed(6)}:duration=${duration.toFixed(6)},asetpts=PTS-STARTPTS[a]`;
 
   try {
     await execAsync(
       `ffmpeg -y -i "${clipFile}" ` +
       `-filter_complex "${filterComplex}" ` +
       `-map "[v]" -map "[a]" ` +
-      `-t ${adjustedDuration.toFixed(4)} ` +
-      `-c:v libx264 -preset ultrafast -crf 18 -c:a aac -b:a 128k -movflags +faststart "${tmpFile}"`,
+      `-t ${duration.toFixed(4)} ` +
+      `-c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k -movflags +faststart "${tmpFile}"`,
       { timeout: 300000 }
     );
     if (fs.existsSync(tmpFile) && fs.statSync(tmpFile).size > 1000) {
       fs.renameSync(tmpFile, clipFile);
-      logger.info({ diff, adjustedDuration }, "Stream desync fixed");
+      logger.info({ diff, trimStart, duration }, "Stream desync fixed");
     }
   } catch (e: any) {
     logger.error({ err: e?.message }, "fixStreamSync failed");
@@ -481,27 +477,49 @@ export async function processClipJob(
       // ── 3. Fast remux — no re-encoding, preserves original quality ────────
       updateJob(job, { progress: 82, progressMsg: "Procesando clip..." });
 
-      const ok = await fastMux(downloadedFile, clipFile, duration);
+      // Use duration + 5s buffer so fixStreamSync can trim desync without shortening the clip
+      const ok = await fastMux(downloadedFile, clipFile, duration + 5);
 
       if (!ok) {
-        // Fallback: re-encode only audio (keep video untouched)
         const probeOut = await execAsync(
           `ffprobe -v quiet -print_format json -show_streams "${downloadedFile}"`,
           { timeout: 10000 }
         ).catch(() => ({ stdout: "{}" }));
         const probeData = JSON.parse((probeOut as any).stdout || "{}");
         const hasAudio = (probeData.streams || []).some((s: any) => s.codec_type === "audio");
-        await muxWithAudioReencode(downloadedFile, clipFile, duration, hasAudio);
+        await muxWithAudioReencode(downloadedFile, clipFile, duration + 5, hasAudio);
       }
 
       cleanup(downloadedFile);
     }
 
-    // Fix audio/video stream desync that arises when -c copy exposes raw PTS
-    // values from yt-dlp's edit-list-wrapped DASH segments.
+    // Fix audio/video stream desync. The +5s buffer downloaded ensures
+    // fixStreamSync can trim the desync gap without shortening the clip.
     await fixStreamSync(clipFile, duration, (msg) =>
       updateJob(job, { progress: 92, progressMsg: msg })
     );
+
+    // If fixStreamSync didn't run (no desync), the clip may be up to 5s longer
+    // than requested. Trim it back with a fast stream copy.
+    {
+      const actualDurStr = await execAsync(
+        `ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${clipFile}"`,
+        { timeout: 5000 }
+      ).then(r => (r as any).stdout?.trim()).catch(() => "0");
+      const actualDur = parseFloat(actualDurStr) || 0;
+      if (actualDur > duration + 1.5) {
+        const tmpTrim = clipFile + ".trim.mp4";
+        await execAsync(
+          `ffmpeg -y -i "${clipFile}" -t ${duration} -c copy "${tmpTrim}"`,
+          { timeout: 30000 }
+        );
+        if (fs.existsSync(tmpTrim) && fs.statSync(tmpTrim).size > 1000) {
+          fs.renameSync(tmpTrim, clipFile);
+        } else {
+          cleanup(tmpTrim);
+        }
+      }
+    }
 
     if (!fs.existsSync(clipFile) || fs.statSync(clipFile).size === 0) {
       throw new Error("El recorte falló — el archivo de salida está vacío");
