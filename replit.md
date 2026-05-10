@@ -86,7 +86,7 @@ A YouTube clip bot runs alongside the Express server. It uses:
 Send `/clip <youtube_url> <start_time> <end_time>` to the bot.
 Example: `/clip https://youtu.be/dQw4w9WgXcQ 0:30 1:00`
 
-Limits: max 3 minutes per clip, max 50MB output file.
+Limits: max 15 minutes per clip, max 50MB output file.
 
 ### Required secrets
 - `TELEGRAM_BOT_TOKEN`: Bot token from @BotFather

@@ -111,7 +111,7 @@ export default function Home() {
       setClipError(err.message); return;
     }
     if (endSec <= startSec) { setClipError("El tiempo de fin debe ser mayor que el de inicio"); return; }
-    if (endSec - startSec > 600) { setClipError("El clip no puede durar más de 10 minutos"); return; }
+    if (endSec - startSec > 900) { setClipError("El clip no puede durar más de 15 minutos"); return; }
 
     setClipLoading(true);
     try {

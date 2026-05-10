@@ -201,7 +201,7 @@ function parseFfmpegProgress(chunk: string, totalSec: number): ProgressInfo | nu
 function spawnYtdlp(
   args: string[],
   onProgress: (info: ProgressInfo) => void,
-  timeoutMs = 180000,
+  timeoutMs = 900000,
   totalDurationSec = 0
 ): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -252,7 +252,7 @@ async function tryYtdlpDownload(
   args: string[],
   outputFile: string,
   onProgress: (info: ProgressInfo) => void,
-  timeoutMs = 180000,
+  timeoutMs = 900000,
   totalDurationSec = 0
 ): Promise<boolean> {
   try {
@@ -439,7 +439,7 @@ async function processClip(
       // Re-encode with explicit stream mapping — ensures no black frames at start and audio is always included
       await execAsync(
         `ffmpeg -y -i "${rawFile}" -ss 0 -t ${duration} -map 0:v:0 -map 0:a:0 -c:v libx264 -c:a aac -preset fast -movflags +faststart "${clipFile}"`,
-        { timeout: 60000 }
+        { timeout: 1800000 }
       );
     } else {
       // No audio in raw — re-download audio separately and mux
@@ -447,11 +447,11 @@ async function processClip(
       const audioFile = rawFile.replace(".mp4", "_audio.m4a");
       const jsArgs2 = ["--js-runtimes", `node:${NODE_BIN}`, ...cookiesArgs];
       const audioArgs = [...jsArgs2, "-f", "bestaudio[ext=m4a]/bestaudio", "--download-sections", `*${startSec}-${endSec}`, "-o", audioFile, url];
-      const gotAudio = await tryYtdlpDownload(audioArgs, audioFile, () => {}, 60000, duration);
+      const gotAudio = await tryYtdlpDownload(audioArgs, audioFile, () => {}, 900000, duration);
       if (gotAudio) {
         await execAsync(
           `ffmpeg -y -i "${rawFile}" -i "${audioFile}" -ss 0 -t ${duration} -map 0:v:0 -map 1:a:0 -c:v libx264 -c:a aac -preset fast -shortest -movflags +faststart "${clipFile}"`,
-          { timeout: 60000 }
+          { timeout: 1800000 }
         );
         await cleanupFiles([audioFile]);
       } else {
@@ -1023,9 +1023,9 @@ bot.on("text", async (ctx) => {
     }
 
     const duration = endSec - startSec;
-    if (duration > 180) {
+    if (duration > 900) {
       return ctx.reply(
-        `❌ El clip dura <b>${formatDuration(duration)}</b>, el máximo es <b>3 minutos</b>.\n\nEnvía un tiempo de fin menor:`,
+        `❌ El clip dura <b>${formatDuration(duration)}</b>, el máximo es <b>15 minutos</b>.\n\nEnvía un tiempo de fin menor:`,
         { ...H, ...CANCEL_KB }
       );
     }
@@ -1081,7 +1081,7 @@ bot.on("text", async (ctx) => {
       `🔴 <b>Grabar YouTube Live</b>\n\n` +
       `${stepTracker(1, 2)}\n\n` +
       `⏱ <b>Paso 2 — Duración de grabación</b>\n` +
-      `¿Cuántos minutos quieres grabar? <b>(1–3 minutos)</b>`,
+      `¿Cuántos minutos quieres grabar? <b>(1–15 minutos)</b>`,
       {
         ...H,
         reply_markup: {
@@ -1090,6 +1090,11 @@ bot.on("text", async (ctx) => {
               { text: "1 min", callback_data: "record_1" },
               { text: "2 min", callback_data: "record_2" },
               { text: "3 min", callback_data: "record_3" },
+              { text: "5 min", callback_data: "record_5" },
+            ],
+            [
+              { text: "10 min", callback_data: "record_10" },
+              { text: "15 min", callback_data: "record_15" },
             ],
             [{ text: "❌ Cancelar", callback_data: "cancel_session" }],
           ],
@@ -1100,9 +1105,9 @@ bot.on("text", async (ctx) => {
 
   if (session.step === "waiting_record_duration") {
     const mins = parseFloat(text.replace(",", "."));
-    if (isNaN(mins) || mins <= 0 || mins > 3) {
+    if (isNaN(mins) || mins <= 0 || mins > 15) {
       return ctx.reply(
-        `❌ Envía un número entre <b>1</b> y <b>3</b> minutos.`,
+        `❌ Envía un número entre <b>1</b> y <b>15</b> minutos.`,
         { ...H, ...CANCEL_KB }
       );
     }

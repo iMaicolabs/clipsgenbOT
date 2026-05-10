@@ -286,7 +286,7 @@ async function raceYtdlpClients(
       url,
     ];
 
-    const handle = spawnYtdlp(args, throttledProgress, 60000);
+    const handle = spawnYtdlp(args, throttledProgress, 900000);
     handles.push({ client: suffix, kill: handle.kill, outArg });
 
     const dest = await handle.promise;

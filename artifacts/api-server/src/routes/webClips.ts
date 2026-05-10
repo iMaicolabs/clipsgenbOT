@@ -41,8 +41,8 @@ router.post("/web-clips", optionalAuth as any, async (req: AuthRequest, res) => 
     res.status(400).json({ error: "El tiempo de fin debe ser mayor que el de inicio" });
     return;
   }
-  if (endSec - startSec > 600) {
-    res.status(400).json({ error: "El clip no puede durar más de 10 minutos" });
+  if (endSec - startSec > 900) {
+    res.status(400).json({ error: "El clip no puede durar más de 15 minutos" });
     return;
   }
 
