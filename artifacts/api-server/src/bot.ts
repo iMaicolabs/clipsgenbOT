@@ -30,6 +30,17 @@ const NODE_BIN = (() => {
   try { return execSync("which node", { encoding: "utf8" }).trim(); }
   catch { return "node"; }
 })();
+
+// Isolated cache dir for downloads — prevents youtube-oauth2 plugin from
+// auto-activating (it would inject Bearer tokens causing HTTP 400 errors).
+const DOWNLOAD_CACHE_HOME = path.join(
+  process.env["XDG_CACHE_HOME"] || path.join(os.homedir(), ".cache"),
+  "yt-dlp-dl"
+);
+if (!fs.existsSync(DOWNLOAD_CACHE_HOME)) {
+  fs.mkdirSync(DOWNLOAD_CACHE_HOME, { recursive: true });
+}
+const DOWNLOAD_ENV = { ...process.env, XDG_CACHE_HOME: DOWNLOAD_CACHE_HOME };
 const OWNER_ID = process.env.TELEGRAM_OWNER_ID ? Number(process.env.TELEGRAM_OWNER_ID) : null;
 
 function isOwner(chatId: number): boolean {
@@ -205,7 +216,7 @@ function spawnYtdlp(
   totalDurationSec = 0
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(YTDLP_BIN, args, { shell: false });
+    const proc = spawn(YTDLP_BIN, args, { shell: false, env: DOWNLOAD_ENV });
     let stderrBuf = "";
     let timedOut = false;
 

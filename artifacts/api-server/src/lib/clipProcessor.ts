@@ -22,6 +22,18 @@ const NODE_BIN = (() => {
   catch { return "node"; }
 })();
 
+// Isolated cache dir for download processes — has no OAuth token so the
+// youtube-oauth2 plugin won't auto-activate and won't inject Bearer headers
+// into InnerTube API calls (which causes HTTP 400 and "Sign in" bot errors).
+const DOWNLOAD_CACHE_HOME = path.join(
+  process.env["XDG_CACHE_HOME"] || path.join(os.homedir(), ".cache"),
+  "yt-dlp-dl"
+);
+if (!fs.existsSync(DOWNLOAD_CACHE_HOME)) {
+  fs.mkdirSync(DOWNLOAD_CACHE_HOME, { recursive: true });
+}
+const DOWNLOAD_ENV = { ...process.env, XDG_CACHE_HOME: DOWNLOAD_CACHE_HOME };
+
 const PO_TOKEN_CLI = path.resolve(
   path.join(__dirname, "../../../node_modules/youtube-po-token-generator/bin/cli.mjs")
 );
@@ -124,7 +136,7 @@ export async function getVideoInfo(url: string): Promise<VideoInfo> {
   const authFlag = authArgs ? ` ${authArgs}` : "";
   const { stdout } = await execAsync(
     `"${YTDLP_BIN}" --js-runtimes "node:${NODE_BIN}"${authFlag} --print-json --skip-download --no-playlist "${url}"`,
-    { timeout: 30000 }
+    { timeout: 30000, env: DOWNLOAD_ENV }
   );
   const data = JSON.parse(stdout.trim());
   return {
@@ -163,7 +175,7 @@ function spawnYtdlp(
   let proc: ReturnType<typeof spawn> | null = null;
 
   const promise = new Promise<string>((resolve, reject) => {
-    proc = spawn(YTDLP_BIN, args, { shell: false });
+    proc = spawn(YTDLP_BIN, args, { shell: false, env: DOWNLOAD_ENV });
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -469,7 +481,7 @@ export async function processClipJob(
         throw new Error(isPrivate
           ? "El video es privado o no está disponible en tu región."
           : isBot
-          ? "YouTube está bloqueando este video por detección de bots. Por favor actualiza las cookies del servidor."
+          ? "YouTube requiere autenticación desde este servidor. Ve a /admin y sube las cookies de tu sesión de YouTube (pestaña 'Cookies manuales')."
           : "No se pudo descargar el video. Es posible que YouTube esté bloqueando temporalmente las descargas desde este servidor. Intenta más tarde."
         );
       }
