@@ -688,7 +688,7 @@ bot.command("start", async (ctx) => {
     `/clip — Recortar un fragmento\n` +
     `/grabar — Grabar un directo activo\n` +
     `/cancelar — Cancelar lo que estés haciendo\n\n` +
-    `<i>Creado por @iMaicol</i>`;
+    `✨ <tg-spoiler>Creado por Maicol</tg-spoiler>`;
   const keyboard = {
     inline_keyboard: [
       [
