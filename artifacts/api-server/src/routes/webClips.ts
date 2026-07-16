@@ -9,7 +9,6 @@ import {
   jobs,
   jobEmitter,
   processClipJob,
-  CLIPS_DIR,
   type ClipJob,
 } from "../lib/clipProcessor";
 import { requireAuth, optionalAuth, type AuthRequest } from "../lib/auth";
@@ -158,7 +157,9 @@ router.get("/web-clips/job/:jobId/download", (req, res) => {
   res.setHeader("Content-Type", "video/mp4");
   const stat = fs.statSync(job.filePath);
   res.setHeader("Content-Length", stat.size);
-  fs.createReadStream(job.filePath).pipe(res);
+  const stream = fs.createReadStream(job.filePath);
+  stream.pipe(res);
+  res.on("finish", () => { fs.unlink(job.filePath!, () => {}); jobs.delete(jobId); });
 });
 
 router.get("/web-clips/db/:dbClipId/download", requireAuth as any, async (req: AuthRequest, res) => {
@@ -180,7 +181,13 @@ router.get("/web-clips/db/:dbClipId/download", requireAuth as any, async (req: A
   res.setHeader("Content-Type", "video/mp4");
   const stat = fs.statSync(clip.filePath);
   res.setHeader("Content-Length", stat.size);
-  fs.createReadStream(clip.filePath).pipe(res);
+  const filePath = clip.filePath;
+  const stream = fs.createReadStream(filePath);
+  stream.pipe(res);
+  res.on("finish", () => {
+    fs.unlink(filePath, () => {});
+    db.update(clipsTable).set({ filePath: null, status: "expired" }).where(eq(clipsTable.id, dbClipId)).catch(() => {});
+  });
 });
 
 router.get("/web-clips", requireAuth as any, async (req: AuthRequest, res) => {

@@ -10,7 +10,7 @@ import { getPipedStreams } from "./pipedDownloader";
 const execAsync = promisify(exec);
 
 export const DATA_DIR = process.env["DATA_DIR"] ?? "/home/runner/workspace/data";
-export const CLIPS_DIR = path.join(DATA_DIR, "web_clips");
+export const CLIPS_DIR = os.tmpdir(); // clips are temporary — never persisted to disk long-term
 const COOKIES_PATH = path.join(DATA_DIR, "yt_cookies.txt");
 const YTDLP_BIN =
   process.env["YTDLP_BIN"] ??
@@ -38,9 +38,6 @@ const PO_TOKEN_CLI = path.resolve(
   path.join(__dirname, "../../../node_modules/youtube-po-token-generator/bin/cli.mjs")
 );
 
-if (!fs.existsSync(CLIPS_DIR)) {
-  fs.mkdirSync(CLIPS_DIR, { recursive: true });
-}
 
 // ── PO Token cache (valid 5 minutes) ────────────────────────────────────────
 interface PoTokenResult { visitorData: string; poToken: string }
