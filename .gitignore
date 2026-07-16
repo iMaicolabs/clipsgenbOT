@@ -47,3 +47,7 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Runtime data — generated files and sensitive cookies, never commit these
+data/web_clips/
+data/yt_cookies.txt
