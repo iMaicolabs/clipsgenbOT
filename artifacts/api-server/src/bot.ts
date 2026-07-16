@@ -1129,7 +1129,7 @@ bot.on("text", async (ctx) => {
   }
 });
 
-for (const mins of [1, 2, 3]) {
+for (const mins of [1, 2, 3, 5, 10, 15]) {
   bot.action(`record_${mins}`, async (ctx) => {
     await ctx.answerCbQuery();
     const chatId = ctx.chat?.id ?? ctx.from?.id;
@@ -1171,28 +1171,25 @@ export async function startBot() {
     logger.warn({ err }, "Failed to set bot commands (non-fatal, will retry on next restart)");
   }
 
-  // Detect webhook domain from multiple platforms:
-  // - WEBHOOK_DOMAIN: manual override (any platform)
-  // - RAILWAY_PUBLIC_DOMAIN: set automatically by Railway
-  // - REPLIT_DOMAINS: set automatically by Replit
+  // Webhook mode — Telegram pushes updates to our HTTPS endpoint.
+  // Priority: WEBHOOK_DOMAIN (manual) → RAILWAY_PUBLIC_DOMAIN → REPLIT_DOMAINS.
+  // Long polling is NOT used because telegraf@4 / node-fetch@2 are incompatible
+  // with Node.js 24's native AbortSignal. Webhook works on Replit dev + prod.
   const webhookDomain =
     process.env["WEBHOOK_DOMAIN"] ??
     process.env["RAILWAY_PUBLIC_DOMAIN"] ??
     process.env["REPLIT_DOMAINS"]?.split(",")[0]?.trim();
 
-  if (webhookDomain) {
-    // Webhook mode — Telegram calls our HTTP server on every update.
-    // Works with autoscale/serverless — no always-on VM needed.
-    const webhookUrl = `https://${webhookDomain}/api/telegram-webhook`;
-    await bot.telegram.setWebhook(webhookUrl, { drop_pending_updates: true });
-    logger.info({ webhookUrl }, "Telegram bot started (webhook)");
-    process.once("SIGTERM", () => bot.stop("SIGTERM"));
-  } else {
-    // Development: long polling
-    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-    await bot.launch();
-    logger.info("Telegram bot started (long polling)");
-    process.once("SIGINT", () => bot.stop("SIGINT"));
-    process.once("SIGTERM", () => bot.stop("SIGTERM"));
+  if (!webhookDomain) {
+    logger.warn(
+      "No webhook domain found (WEBHOOK_DOMAIN / RAILWAY_PUBLIC_DOMAIN / REPLIT_DOMAINS). " +
+      "Bot will NOT receive messages. Set WEBHOOK_DOMAIN to a public HTTPS domain."
+    );
+    return;
   }
+
+  const webhookUrl = `https://${webhookDomain}/api/telegram-webhook`;
+  await bot.telegram.setWebhook(webhookUrl, { drop_pending_updates: true });
+  logger.info({ webhookUrl }, "Telegram bot started (webhook)");
+  process.once("SIGTERM", () => bot.stop("SIGTERM"));
 }
