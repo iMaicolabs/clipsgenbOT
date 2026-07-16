@@ -786,16 +786,33 @@ bot.command("grabar", (ctx) => {
   );
 });
 
-bot.on("document", async (ctx) => {
-  const doc = ctx.message.document;
-  const fileName = doc.file_name?.toLowerCase() ?? "";
+function looksLikeCookies(text: string): boolean {
+  return (
+    text.includes("# Netscape HTTP Cookie File") ||
+    text.includes("# HTTP Cookie File") ||
+    (text.includes("youtube.com") && text.includes("\t") && text.split("\n").some(l => l.split("\t").length >= 6))
+  );
+}
 
-  if (!fileName.includes("cookie") && !fileName.endsWith(".txt")) {
-    return ctx.reply(
-      `📄 Para subir cookies, envía un archivo <code>.txt</code> exportado desde tu navegador.\n\nUsa /cookies para ver las instrucciones.`,
+async function saveCookiesText(chatId: number, msgId: number, content: string, ctx: any) {
+  if (content.length < 100) {
+    return ctx.telegram.editMessageText(chatId, msgId, undefined,
+      `❌ <b>Contenido inválido</b>\n\nEl texto de cookies parece estar vacío o incompleto. Expórtalo de nuevo.`,
       H
     );
   }
+  fs.mkdirSync(path.dirname(COOKIES_PATH), { recursive: true });
+  fs.writeFileSync(COOKIES_PATH, content, "utf8");
+  const sizeKB = (Buffer.byteLength(content, "utf8") / 1024).toFixed(1);
+  logger.info({ sizeKB }, "Cookies saved from text");
+  await ctx.telegram.editMessageText(chatId, msgId, undefined,
+    `✅ <b>Cookies guardadas</b>  ·  ${sizeKB} KB\n\nYa puedes descargar videos y contenido restringido.`,
+    H
+  );
+}
+
+bot.on("document", async (ctx) => {
+  const doc = ctx.message.document;
 
   if (!isOwner(ctx.chat.id)) {
     return ctx.reply(`⛔ <b>Sin permisos</b>\n\nSolo el administrador puede actualizar las cookies.`, H);
@@ -958,6 +975,15 @@ bot.on("text", async (ctx) => {
   const text = ctx.message.text.trim();
 
   if (text.startsWith("/")) return;
+
+  // Detect cookies pasted directly as text (any session state)
+  if (looksLikeCookies(text)) {
+    if (!isOwner(chatId)) {
+      return ctx.reply(`⛔ <b>Sin permisos</b>\n\nSolo el administrador puede actualizar las cookies.`, H);
+    }
+    const statusMsg = await ctx.reply(`⏳ <b>Guardando cookies...</b>`, H);
+    return saveCookiesText(chatId, statusMsg.message_id, text, ctx);
+  }
 
   if (session.step === "idle") {
     return ctx.reply(
