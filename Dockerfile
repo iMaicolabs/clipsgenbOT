@@ -1,4 +1,4 @@
-FROM node:22-slim
+FROM node:24-slim
 
 # System deps: ffmpeg for video processing, curl for yt-dlp download
 RUN apt-get update && apt-get install -y \
